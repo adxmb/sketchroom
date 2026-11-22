@@ -9,16 +9,10 @@ import {
     deleteSession,
     getUserByToken,
 } from "./sessions.js";
+import { usernameSchema } from "../protocol.js";
 
 const credentials = z.object({
-    username: z
-        .string()
-        .min(3, "Username must have 3 to 20 characters")
-        .max(20, "Username must have 3 to 20 characters")
-        .regex(
-            /^[A-Za-z0-9_]+$/,
-            "Username can only contain letters, numbers, and underscores",
-        ),
+    username: usernameSchema,
     password: z
         .string()
         .min(8, "Password must have at least 8 characters")
