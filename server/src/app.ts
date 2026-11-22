@@ -3,6 +3,8 @@ import rateLimit from "@fastify/rate-limit";
 import Fastify from "fastify";
 import { authRoutes } from "./auth/routes.js";
 import type { Db } from "./db/types.js";
+import { gateway } from "./game/gateway.js";
+import { RoomManager } from "./game/rooms.js";
 
 export interface AppOptions {
     db: Db;
@@ -11,6 +13,11 @@ export interface AppOptions {
     /** Trust X-Forwarded-For. Turn on behind a proxy such as Render */
     trustProxy?: boolean;
     authRateLimit?: number;
+    /** Where else can open a ws */
+    allowedOrigins?: string[];
+    rooms?: RoomManager;
+    messagesPerSecond?: number;
+    createRoomLimit?: number;
     logger?: boolean;
 }
 
@@ -26,6 +33,13 @@ export async function buildApp(opts: AppOptions) {
         db: opts.db,
         secureCookies: opts.secureCookies ?? false,
         authRateLimit: opts.authRateLimit ?? 10,
+    });
+    await app.register(gateway, {
+        db: opts.db,
+        rooms: opts.rooms ?? new RoomManager(),
+        allowedOrigins: opts.allowedOrigins ?? [],
+        messagesPerSecond: opts.messagesPerSecond ?? 30,
+        createRoomLimit: opts.createRoomLimit ?? 20,
     });
     app.get("/health", async () => ({ status: "ok" }));
     return app;
