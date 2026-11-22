@@ -63,3 +63,10 @@ Server to client: `room_state`, `player_joined`, `player_left`, `round_start`
 5. Day 5: guessing, chat, scoring, end-of-game screen. Save scores for accounts.
 6. Day 6: reconnect after a lost connection, limits, more tests.
 7. Day 7: deploy, README, screenshots, a short demo clip.
+
+## Reference Notes
+
+- Guests have no database rows. A guest name is unique in one room, ignoring letter case. A guest cannot use the name of an account
+- A room is removed 10 minutes after creation if nobody joins. A room is removed 60 seconds after its last player leaves
+- Rooms live in server memory. A server restart ends all rooms. Many servers would need a shared store such as Redis
+- The server checks the Origin header on every WebSocket connection
