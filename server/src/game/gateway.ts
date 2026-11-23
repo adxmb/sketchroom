@@ -12,6 +12,7 @@ import {
 } from "../protocol.js";
 import type { RoomManager } from "./rooms.js";
 import { pickWords } from "./words.js";
+import { saveGame } from "../stats.js";
 import { pl } from "zod/v4/locales";
 
 export interface GatewayOptions {
@@ -45,6 +46,9 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
     server_error: "The server had a problem. Try again",
     rate_limited: "You send messages too fast",
 };
+
+const CHAT_BURST = 5;
+const CHAT_WINDOW_MS = 5000;
 
 /**
  * A browser always sends an Origin header with a WebSocket request. Accept it only if
@@ -110,6 +114,20 @@ export async function gateway(app: FastifyInstance, opts: GatewayOptions) {
         }
     }
 
+    /** Send one message to all players in a room, or to some of them */
+    function deliver(
+        code: string,
+        to: "all" | string[],
+        message: ServerMessage,
+    ) {
+        if (to === "all") return sendToOthers(code, "", message);
+        const text = JSON.stringify(message);
+        for (const playerId of to) {
+            const socket = sockets.get(code)?.get(playerId);
+            if (socket && socket.readyState === socket.OPEN) socket.send(text);
+        }
+    }
+
     function sendToOthers(
         code: string,
         expectId: string,
@@ -125,6 +143,9 @@ export async function gateway(app: FastifyInstance, opts: GatewayOptions) {
     // Game timers. Rooms that changed get a new state
     const ticker = setInterval(() => {
         for (const code of rooms.tick()) broadcast(code);
+        for (const game of rooms.takeFinished()) {
+            saveGame(db, game).catch((err) => app.log.error(err));
+        }
     }, opts.tickMs);
     ticker.unref();
     app.addHook("onClose", async () => clearInterval(ticker));
@@ -157,6 +178,7 @@ export async function gateway(app: FastifyInstance, opts: GatewayOptions) {
             let chain: Promise<void> = Promise.resolve();
             let windowStart = Date.now();
             let windowCount = 0;
+            const chatTimes: number[] = [];
 
             const send = (message: ServerMessage) => {
                 if (socket.readyState === socket.OPEN)
@@ -218,6 +240,36 @@ export async function gateway(app: FastifyInstance, opts: GatewayOptions) {
                                 : result.error,
                         );
                     return broadcast(code);
+                }
+
+                if (message.type === "chat") {
+                    if (!joined) return fail("not_in_room");
+                    const now = Date.now();
+                    while (
+                        chatTimes.length > 0 &&
+                        now - chatTimes[0]! > CHAT_WINDOW_MS
+                    )
+                        chatTimes.shift();
+                    if (chatTimes.length >= CHAT_BURST)
+                        return fail("rate_limited");
+                    chatTimes.push(now);
+                    const outcome = rooms.chat(
+                        joined.code,
+                        joined.playerId,
+                        message.text,
+                    );
+                    if (!outcome) return;
+                    for (const {
+                        to,
+                        message: chatMessage,
+                    } of outcome.deliveries) {
+                        deliver(joined.code, to, {
+                            type: "chat",
+                            message: chatMessage,
+                        });
+                    }
+                    if (outcome.stateChanged) broadcast(joined.code);
+                    return;
                 }
 
                 if (

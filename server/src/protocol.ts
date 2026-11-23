@@ -22,6 +22,16 @@ export const roomCodeSchema = z
     .string()
     .regex(/^[A-HJ-NP-Z2-9]{5}$/, "Invalid room code");
 
+export const chatTextSchema = z
+    .string()
+    .trim()
+    .min(1)
+    .max(100)
+    .regex(
+        /^[^\u0000-\u001f\u007f]*$/,
+        "Text has characted that are not allowed",
+    );
+
 export const modeSchema = z.enum(["compete", "collab"]);
 export type Mode = z.infer<typeof modeSchema>;
 
@@ -78,6 +88,7 @@ export interface Stroke {
 }
 
 // ------- Client to server --------
+
 export const clientMessageSchema = z.discriminatedUnion("type", [
     z.object({
         type: z.literal("join_room"),
@@ -89,15 +100,31 @@ export const clientMessageSchema = z.discriminatedUnion("type", [
     z.object({ type: z.literal("draw"), stroke: strokeChunkSchema }),
     z.object({ type: z.literal("undo_stroke") }),
     z.object({ type: z.literal("clear_canvas") }),
+    z.object({ type: z.literal("chat"), text: chatTextSchema }),
 ]);
 export type ClientMessage = z.infer<typeof clientMessageSchema>;
 
 // ------- Server to client --------
+
 export interface PlayerView {
     id: string;
     name: string;
     isGuest: boolean;
     isHost: boolean;
+    score: number;
+    guessed: boolean;
+}
+
+export interface ChatMessage {
+    kind: "chat" | "guessed" | "close";
+    playerId: string;
+    name: string;
+    text: string;
+    knowsWord: boolean;
+}
+
+export interface ResultsView {
+    players: { name: string; score: number; rank: number; isGuest: boolean }[];
 }
 
 export interface GameView {
@@ -116,6 +143,7 @@ export interface RoomView {
     players: PlayerView[];
     // Null while in lobby
     game: GameView | null;
+    results: ResultsView | null;
 }
 
 export type ErrorCode =
@@ -141,4 +169,21 @@ export type ServerMessage =
     | { type: "draw"; stroke: StrokeChunk }
     | { type: "canvas"; strokes: Stroke[] }
     | { type: "left" }
+    | { type: "chat"; message: ChatMessage }
     | { type: "error"; code: ErrorCode; message: string };
+
+// ---- Scores (REST, not WebSocket) ----
+
+export interface Stats {
+    games: number;
+    wins: number;
+    bestScore: number;
+    totalScore: number;
+}
+
+export interface LeaderboardRow {
+    username: string;
+    totalScore: number;
+    games: number;
+    wins: number;
+}

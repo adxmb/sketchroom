@@ -442,3 +442,284 @@ describe("drawing", () => {
         expect(result).toEqual({ ok: false, error: "canvas_limit" });
     });
 });
+
+describe("guessing and scores", () => {
+    const WORDS = ["apple", "robot", "tiger"];
+
+    function playSetup(names: string[], opts: { rounds?: number } = {}) {
+        const clock = { now: 1_000 };
+        const manager = new RoomManager({
+            now: () => clock.now,
+            makeCode: counterCodes(),
+            drawMs: 60_000,
+            revealMs: 5_000,
+            rounds: 1,
+            ...opts,
+        });
+        const created = manager.createRoom("compete");
+        if (!created.ok) throw new Error();
+        const ids = names.map((name) => {
+            const r = manager.join(created.code, { name, userId: null });
+            if (!r.ok) throw new Error();
+            return r.player.id;
+        });
+        manager.startGame(created.code, ids[0]!, WORDS);
+        const scores = () =>
+            Object.fromEntries(
+                manager
+                    .view(created.code)!
+                    .players.map((p) => [p.name, p.score]),
+            );
+        return { manager, code: created.code, ids, clock, scores };
+    }
+
+    it("sends chat in the lobby to everyone", () => {
+        const manager = new RoomManager();
+        const created = manager.createRoom("compete");
+        if (!created.ok) throw new Error();
+        const a = manager.join(created.code, { name: "ann", userId: null });
+        if (!a.ok) throw new Error();
+        const out = manager.chat(created.code, a.player.id, "hello")!;
+        expect(out.stateChanged).toBe(false);
+        expect(out.deliveries).toEqual([
+            {
+                to: "all",
+                message: {
+                    kind: "chat",
+                    playerId: a.player.id,
+                    name: "ann",
+                    text: "hello",
+                    knowsWord: false,
+                },
+            },
+        ]);
+    });
+
+    it("returns null for a player who is not in the room", () => {
+        const { manager, code } = playSetup(["ann", "bob"]);
+        expect(manager.chat(code, "nobody", "hi")).toBeNull();
+        expect(manager.chat("ZZZZZ", "nobody", "hi")).toBeNull();
+    });
+
+    it("shows a wrong guess to everyone and gives no points", () => {
+        const { manager, code, ids, scores } = playSetup(["ann", "bob", "cat"]);
+        const out = manager.chat(code, ids[1]!, "banana")!;
+        expect(out.stateChanged).toBe(false);
+        expect(out.deliveries).toHaveLength(1);
+        expect(out.deliveries[0]).toMatchObject({
+            to: "all",
+            message: { kind: "chat", text: "banana", knowsWord: false },
+        });
+        expect(scores()).toEqual({ ann: 0, bob: 0, cat: 0 });
+    });
+
+    it("does not send the text of a correct guess", () => {
+        const { manager, code, ids } = playSetup(["ann", "bob", "cat"]);
+        const out = manager.chat(code, ids[1]!, "  APPLE ")!;
+        expect(out.stateChanged).toBe(true);
+        expect(out.deliveries).toEqual([
+            {
+                to: "all",
+                message: {
+                    kind: "guessed",
+                    playerId: ids[1],
+                    name: "bob",
+                    text: "",
+                    knowsWord: false,
+                },
+            },
+        ]);
+        expect(JSON.stringify(out)).not.toMatch(/apple/i);
+    });
+
+    it("gives more points for a fast guess", () => {
+        const { manager, code, ids, clock, scores } = playSetup([
+            "ann",
+            "bob",
+            "cat",
+        ]);
+        manager.chat(code, ids[1]!, "apple");
+        clock.now += 30_000;
+        manager.chat(code, ids[2]!, "apple");
+        expect(scores()).toEqual({ ann: 300, bob: 500, cat: 300 }); // Ann is the drawer. Her points came at the end of the turn
+    });
+
+    it("marks the players who found the word", () => {
+        const { manager, code, ids } = playSetup(["ann", "bob", "cat"]);
+        manager.chat(code, ids[1]!, "apple");
+        const guessed = Object.fromEntries(
+            manager.view(code)!.players.map((p) => [p.name, p.guessed]),
+        );
+        expect(guessed).toEqual({ ann: false, bob: true, cat: false });
+    });
+
+    it("keeps the chat of the drawer and of players who found the word between them", () => {
+        const { manager, code, ids } = playSetup(["ann", "bob", "cat"]);
+        const fromDrawer = manager.chat(code, ids[0]!, "it is red")!;
+        expect(fromDrawer.deliveries).toEqual([
+            {
+                to: [ids[0]],
+                message: expect.objectContaining({
+                    kind: "chat",
+                    text: "it is red",
+                    knowsWord: true,
+                }),
+            },
+        ]);
+        manager.chat(code, ids[1]!, "apple");
+        const fromBob = manager.chat(code, ids[1]!, "easy one")!;
+        expect(fromBob.deliveries[0]!.to).toEqual([ids[0], ids[1]]);
+        expect(fromBob.deliveries[0]!.message.knowsWord).toBe(true);
+    });
+
+    it("does not give points two times to the same player", () => {
+        const { manager, code, ids, scores } = playSetup(["ann", "bob", "cat"]);
+        manager.chat(code, ids[1]!, "apple");
+        manager.chat(code, ids[1]!, "apple");
+        expect(scores().bob).toBe(500);
+    });
+
+    it("tells a guesser privately when the guess is close", () => {
+        const { manager, code, ids } = playSetup(["ann", "bob", "cat"]);
+        const out = manager.chat(code, ids[1]!, "apples")!;
+        expect(out.deliveries).toHaveLength(2);
+        expect(out.deliveries[0]).toMatchObject({
+            to: "all",
+            message: { kind: "chat", text: "apples" },
+        });
+        expect(out.deliveries[1]).toMatchObject({
+            to: [ids[1]],
+            message: { kind: "close", text: "" },
+        });
+    });
+
+    it("ends the turn when all guessers found the word, and pays the drawer", () => {
+        const { manager, code, ids, scores } = playSetup(["ann", "bob", "cat"]);
+        manager.chat(code, ids[1]!, "apple");
+        expect(manager.view(code)!.game!.phase).toBe("drawing");
+        manager.chat(code, ids[2]!, "apple");
+        expect(manager.view(code)!.game!.phase).toBe("reveal");
+        expect(scores()).toEqual({ ann: 300, bob: 500, cat: 500 });
+        // After the turn ends, a guess is only chat
+        expect(
+            manager.chat(code, ids[2]!, "apple")!.deliveries[0],
+        ).toMatchObject({ message: { kind: "chat", knowsWord: false } });
+    });
+
+    it("pays the drawer for the share of guessers who found the word", () => {
+        const { manager, code, ids, clock, scores } = playSetup([
+            "ann",
+            "bob",
+            "cat",
+        ]);
+        manager.chat(code, ids[1]!, "apple");
+        clock.now += 60_000;
+        manager.tick();
+        expect(scores().ann).toBe(150);
+    });
+
+    it("pays the drawer nothing when nobody found the word", () => {
+        const { manager, clock, scores } = playSetup(["ann", "bob"]);
+        clock.now += 60_000;
+        manager.tick();
+        expect(scores()).toEqual({ ann: 0, bob: 0 });
+    });
+
+    it("ends the turn when the guessers who are left all found the word", () => {
+        const { manager, code, ids, scores } = playSetup(["ann", "bob", "cat"]);
+        manager.chat(code, ids[1]!, "apple");
+        manager.leave(code, ids[2]!);
+        expect(manager.view(code)!.game!.phase).toBe("reveal");
+        expect(scores()).toEqual({ ann: 300, bob: 500 });
+    });
+
+    it("gives no points to the drawer who leaves, and removes the score of the player", () => {
+        const { manager, code, ids } = playSetup(["ann", "bob", "cat"]);
+        manager.chat(code, ids[1]!, "apple");
+        manager.leave(code, ids[0]!);
+        expect(manager.view(code)!.game!.phase).toBe("reveal");
+        const names = manager.view(code)!.players.map((p) => p.name);
+        expect(names).toEqual(["bob", "cat"]);
+    });
+
+    it("clears who found the word when the next turn starts", () => {
+        const { manager, code, ids, clock } = playSetup(["ann", "bob"]);
+        manager.chat(code, ids[1]!, "apple");
+        clock.now += 5_000;
+        manager.tick();
+        const view = manager.view(code)!;
+        expect(view.game!.turn).toBe(2);
+        expect(view.players.every((p) => !p.guessed)).toBe(true);
+    });
+
+    it("ends the game with ranked results, and keeps them for the end screen", () => {
+        const { manager, code, ids, clock } = playSetup(["ann", "bob"]);
+        expect(manager.view(code)!.results).toBeNull();
+        manager.chat(code, ids[1]!, "apple"); // Bob: 500. Ann gets 300 when the turn ends
+        clock.now += 5_000;
+        manager.tick(); // The reveal is over. Turn 2: Bob draws
+        clock.now += 30_000;
+        manager.chat(code, ids[0]!, "robot"); // Ann: 300. Bob gets 300
+        clock.now += 5_000;
+        manager.tick(); // The last reveal is over. The game ends
+        const view = manager.view(code)!;
+        expect(view.game).toBeNull();
+        expect(view.results).toEqual({
+            players: [
+                { name: "bob", score: 800, rank: 1, isGuest: true },
+                { name: "ann", score: 600, rank: 2, isGuest: true },
+            ],
+        });
+        expect(view.players.map((p) => p.score)).toEqual([0, 0]);
+    });
+
+    it("gives each finished game one time, with the account ids", () => {
+        const clock = { now: 1_000 };
+        const manager = new RoomManager({
+            now: () => clock.now,
+            makeCode: counterCodes(),
+            rounds: 1,
+        });
+        const created = manager.createRoom("compete");
+        if (!created.ok) throw new Error();
+        const a = manager.join(created.code, { name: "ann", userId: 7 });
+        const b = manager.join(created.code, { name: "bob", userId: null });
+        if (!a.ok || !b.ok) throw new Error();
+        manager.startGame(created.code, a.player.id, WORDS);
+        for (let i = 0; i < 4; i++) {
+            clock.now += 60_000;
+            manager.tick();
+        }
+        const finished = manager.takeFinished();
+        expect(finished).toEqual([
+            {
+                code: created.code,
+                rounds: 1,
+                players: [
+                    { userId: 7, name: "ann", score: 0, rank: 1 },
+                    { userId: null, name: "bob", score: 0, rank: 1 },
+                ],
+            },
+        ]);
+        expect(manager.takeFinished()).toEqual([]);
+    });
+
+    it("does not count a game that stopped early", () => {
+        const { manager, code, ids } = playSetup(["ann", "bob"]);
+        manager.leave(code, ids[1]!);
+        expect(manager.view(code)!.game).toBeNull();
+        expect(manager.view(code)!.results).toBeNull();
+        expect(manager.takeFinished()).toEqual([]);
+    });
+
+    it("clears the old results when a new game starts", () => {
+        const { manager, code, ids, clock } = playSetup(["ann", "bob"]);
+        for (let i = 0; i < 4; i++) {
+            clock.now += 60_000;
+            manager.tick();
+        }
+        expect(manager.view(code)!.results).not.toBeNull();
+        manager.startGame(code, ids[0]!, WORDS);
+        expect(manager.view(code)!.results).toBeNull();
+    });
+});

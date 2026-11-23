@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { applyChunk, undoLast, type CanvasLimits } from "../src/canvas.js";
 import {
     clientMessageSchema,
+    chatTextSchema,
     type Stroke,
     type StrokeChunk,
 } from "../src/protocol.js";
@@ -226,5 +227,40 @@ describe("message rules", () => {
         ["a negative id", { ...ok, id: -1 }],
     ])("rejects %s", (_label, stroke) => {
         expect(draw(stroke)).toBe(false);
+    });
+});
+
+describe("chat text rules", () => {
+    it("removes spaces at the ends", () => {
+        expect(chatTextSchema.parse("  hello  ")).toBe("hello");
+    });
+
+    it.each([
+        ["an empty text", ""],
+        ["only spaces", "   "],
+        ["a text with more than 100 characters", "x".repeat(101)],
+        ["a new line", "one\ntwo"],
+        ["a null character", "a\u0000b"],
+        ["a text that is not a string", 5],
+    ])("rejects %s", (_label, text) => {
+        expect(chatTextSchema.safeParse(text).success).toBe(false);
+    });
+
+    it("accepts 100 characters and normal symbols", () => {
+        expect(chatTextSchema.safeParse("x".repeat(100)).success).toBe(true);
+        expect(
+            chatTextSchema.safeParse(
+                "is it <b>a cat</b>? \u00e9\u00e8 \ud83d\ude00",
+            ).success,
+        ).toBe(true);
+    });
+
+    it("is part of the client messages", () => {
+        expect(
+            clientMessageSchema.safeParse({ type: "chat", text: "hi" }).success,
+        ).toBe(true);
+        expect(clientMessageSchema.safeParse({ type: "chat" }).success).toBe(
+            false,
+        );
     });
 });

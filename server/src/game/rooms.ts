@@ -1,15 +1,26 @@
 import { randomInt, randomUUID } from "node:crypto";
+import { applyChunk, undoLast } from "../canvas.js";
 import {
     MAX_PLAYERS,
     ROOM_CODE_ALPHABET,
+    type ChatMessage,
     type GameView,
     type Mode,
+    type ResultsView,
     type RoomView,
     type Stroke,
     type StrokeChunk,
 } from "../protocol.js";
-import { buildOrder, maskWord, nextTurn } from "./rules.js";
-import { applyChunk, undoLast } from "../canvas.js";
+import {
+    buildOrder,
+    drawerScore,
+    guesserScore,
+    isCloseGuess,
+    isCorrectGuess,
+    maskWord,
+    nextTurn,
+    rankPlayers,
+} from "./rules.js";
 
 export interface Player {
     id: string;
@@ -26,6 +37,26 @@ interface Game {
     endsAt: number;
     // Current drawing
     strokes: Stroke[];
+    scores: Map<string, number>;
+    guessed: Set<string>;
+}
+
+/** A game that ended. The caller saves it for the accounts in it */
+export interface FinishedGame {
+    code: string;
+    rounds: number;
+    players: {
+        userId: number | null;
+        name: string;
+        score: number;
+        rank: number;
+    }[];
+}
+
+/** A message and the players who get it */
+export interface ChatDelivery {
+    to: "all" | string[];
+    message: ChatMessage;
 }
 
 interface Room {
@@ -38,6 +69,7 @@ interface Room {
     /** When the final player leaves, null if still occupied */
     emptySince: number | null;
     game: Game | null;
+    lastResults: ResultsView | null;
 }
 
 export type StartError =
@@ -77,6 +109,7 @@ function randomCode(): string {
  */
 export class RoomManager {
     private rooms = new Map<string, Room>();
+    private finished: FinishedGame[] = [];
     private maxRooms: number;
     private maxPlayers: number;
     private unusedTtlMs: number;
@@ -128,6 +161,7 @@ export class RoomManager {
             everJoined: false,
             emptySince: null,
             game: null,
+            lastResults: null,
         });
         return { ok: true, code };
     }
@@ -198,6 +232,7 @@ export class RoomManager {
         );
         if (order.length === 0)
             return { ok: false, error: "not_enough_players" };
+        room.lastResults = null;
         room.game = {
             order,
             words,
@@ -205,6 +240,8 @@ export class RoomManager {
             phase: "drawing",
             endsAt: this.now() + this.drawMs,
             strokes: [],
+            scores: new Map(),
+            guessed: new Set(),
         };
         return { ok: true };
     }
@@ -217,8 +254,7 @@ export class RoomManager {
             const game = room.game;
             if (!game || now < game.endsAt) continue;
             if (game.phase === "drawing") {
-                game.phase = "reveal";
-                game.endsAt = now + this.revealMs;
+                this.endTurn(room, game, true);
             } else {
                 const next = nextTurn(
                     game.order,
@@ -226,10 +262,11 @@ export class RoomManager {
                     new Set(room.players.keys()),
                 );
                 if (next === null) {
-                    room.game = null;
+                    this.finishGame(room, game);
                 } else {
                     game.turn = next;
                     game.strokes = [];
+                    game.guessed = new Set();
                     game.phase = "drawing";
                     game.endsAt = now + this.drawMs;
                 }
@@ -237,6 +274,150 @@ export class RoomManager {
             changed.push(room.code);
         }
         return changed;
+    }
+
+    /** Games that ended since the last call. The caller saves them */
+    takeFinished(): FinishedGame[] {
+        return this.finished.splice(0);
+    }
+
+    /**
+     * A chat message. In the drawing phase, a message from a guesser is a guess.
+     * Return who gets which message, and if the room state changed. null if the player is not in the room.
+     */
+    chat(
+        code: string,
+        playerId: string,
+        text: string,
+    ): { deliveries: ChatDelivery[]; stateChanged: boolean } | null {
+        const room = this.rooms.get(code);
+        const player = room?.players.get(playerId);
+        if (!room || !player) return null;
+        const game = room.game;
+        const base = { playerId, name: player.name };
+
+        if (!game || game.phase !== "drawing") {
+            const message: ChatMessage = {
+                ...base,
+                kind: "chat",
+                text,
+                knowsWord: false,
+            };
+            return {
+                deliveries: [{ to: "all", message }],
+                stateChanged: false,
+            };
+        }
+
+        const drawerId = game.order[game.turn]!;
+        const word = game.words[game.turn]!;
+
+        if (playerId === drawerId || game.guessed.has(playerId)) {
+            // This player knows the word. The others must not read the text, as it can give the word away
+            const to = [drawerId, ...game.guessed].filter((id) =>
+                room.players.has(id),
+            );
+            const message: ChatMessage = {
+                ...base,
+                kind: "chat",
+                text,
+                knowsWord: true,
+            };
+            return { deliveries: [{ to, message }], stateChanged: false };
+        }
+
+        if (isCorrectGuess(text, word)) {
+            const msLeft = Math.max(0, game.endsAt - this.now());
+            game.scores.set(
+                playerId,
+                (game.scores.get(playerId) ?? 0) +
+                    guesserScore(msLeft, this.drawMs),
+            );
+            game.guessed.add(playerId);
+            if (this.allGuessed(room, game)) this.endTurn(room, game, true);
+            // The text is not sent, so the word stays secret
+            const message: ChatMessage = {
+                ...base,
+                kind: "guessed",
+                text: "",
+                knowsWord: false,
+            };
+            return { deliveries: [{ to: "all", message }], stateChanged: true };
+        }
+
+        const deliveries: ChatDelivery[] = [
+            {
+                to: "all",
+                message: { ...base, kind: "chat", text, knowsWord: false },
+            },
+        ];
+        if (isCloseGuess(text, word)) {
+            deliveries.push({
+                to: [playerId],
+                message: { ...base, kind: "close", text: "", knowsWord: false },
+            });
+        }
+        return { deliveries, stateChanged: false };
+    }
+
+    /** True if every player except the drawer found the word */
+    private allGuessed(room: Room, game: Game): boolean {
+        const drawerId = game.order[game.turn];
+        let guessers = 0;
+        for (const id of room.players.keys()) {
+            if (id === drawerId) continue;
+            guessers++;
+            if (!game.guessed.has(id)) return false;
+        }
+        return guessers > 0;
+    }
+
+    /** End the time to draw. The drawer gets points for the guessers, except when the drawer left */
+    private endTurn(room: Room, game: Game, awardDrawer: boolean) {
+        const drawerId = game.order[game.turn]!;
+        if (awardDrawer && room.players.has(drawerId)) {
+            const guessers = room.players.size - 1;
+            const correct = [...game.guessed].filter((id) =>
+                room.players.has(id),
+            ).length;
+            game.scores.set(
+                drawerId,
+                (game.scores.get(drawerId) ?? 0) +
+                    drawerScore(correct, guessers),
+            );
+        }
+        game.phase = "reveal";
+        game.endsAt = this.now() + this.revealMs;
+    }
+
+    /** The last turn is over. Keep the results for the end screen and for the database */
+    private finishGame(room: Room, game: Game) {
+        const ranked = rankPlayers(
+            [...room.players.values()].map((p) => ({
+                name: p.name,
+                userId: p.userId,
+                score: game.scores.get(p.id) ?? 0,
+            })),
+        );
+        room.lastResults = {
+            players: ranked.map((p) => ({
+                name: p.name,
+                score: p.score,
+                rank: p.rank,
+                isGuest: p.userId === null,
+            })),
+        };
+        this.finished.push({
+            code: room.code,
+            rounds: this.rounds,
+            players: ranked.map((p) => ({
+                userId: p.userId,
+                name: p.name,
+                score: p.score,
+                rank: p.rank,
+            })),
+        });
+        room.game = null;
     }
 
     private gameForDrawer(code: string, playerId: string): Game | null {
@@ -306,14 +487,20 @@ export class RoomManager {
     private afterLeave(room: Room, playerId: string) {
         const game = room.game;
         if (!game) return;
+        game.scores.delete(playerId);
+        game.guessed.delete(playerId);
         if (room.players.size < this.minPlayers) {
+            // Not enough players to go on. The game does not count
             room.game = null;
-        } else if (
-            game.phase === "drawing" &&
-            game.order[game.turn] === playerId
-        ) {
-            game.phase = "reveal";
-            game.endsAt = this.now() + this.revealMs;
+            room.lastResults = null;
+        } else if (game.phase === "drawing") {
+            if (game.order[game.turn] === playerId) {
+                // The drawer left. End the turn now. There are no points for the drawer
+                this.endTurn(room, game, false);
+            } else if (this.allGuessed(room, game)) {
+                // The only guessers who are left already found the word
+                this.endTurn(room, game, true);
+            }
         }
     }
 
@@ -341,8 +528,11 @@ export class RoomManager {
                 name: p.name,
                 isGuest: p.userId === null,
                 isHost: p.id === room.hostId,
+                score: room.game?.scores.get(p.id) ?? 0,
+                guessed: room.game?.guessed.has(p.id) ?? false,
             })),
             game: room.game ? this.gameView(room.game, viewerId) : null,
+            results: room.lastResults,
         };
     }
 }

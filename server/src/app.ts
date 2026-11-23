@@ -5,6 +5,7 @@ import { authRoutes } from "./auth/routes.js";
 import type { Db } from "./db/types.js";
 import { gateway } from "./game/gateway.js";
 import { RoomManager } from "./game/rooms.js";
+import { statsRoutes } from "./stats.js";
 
 export interface AppOptions {
     db: Db;
@@ -35,6 +36,7 @@ export async function buildApp(opts: AppOptions) {
         secureCookies: opts.secureCookies ?? false,
         authRateLimit: opts.authRateLimit ?? 10,
     });
+    await app.register(statsRoutes, { db: opts.db });
     await app.register(gateway, {
         db: opts.db,
         rooms: opts.rooms ?? new RoomManager(),

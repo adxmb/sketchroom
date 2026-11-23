@@ -11,6 +11,7 @@ it("runs each migration once", async () => {
     expect(rows.map((r) => r.name)).toEqual([
         "001_users_sessions.sql",
         "002_words.sql",
+        "003_games.sql",
     ]);
     await db.close();
 });

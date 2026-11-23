@@ -610,3 +610,205 @@ describe("drawing", () => {
         );
     });
 });
+
+describe("chat, guesses and saved scores", () => {
+    type RoomMessage = Extract<ServerMessage, { type: "room_state" }>;
+    type ChatMsg = Extract<ServerMessage, { type: "chat" }>;
+
+    async function register(name: string) {
+        const res = await server!.app.inject({
+            method: "POST",
+            url: "/api/auth/register",
+            payload: { username: name, password: "correct horse" },
+        });
+        return {
+            cookie: `sid=${res.cookies.find((c) => c.name === "sid")!.value}`,
+            id: res.json().user.id as number,
+        };
+    }
+
+    /** Wait for a room state that fits the test */
+    async function until(
+        client: Client,
+        test: (m: RoomMessage) => boolean,
+    ): Promise<RoomMessage> {
+        for (;;) {
+            const m = await client.nextOfType("room_state");
+            if (test(m)) return m;
+        }
+    }
+
+    /** Ann (drawer), Bob and Cat are in a room and the game has started. `word` is the secret word */
+    async function startedGame(game: RoomManagerOptions = {}) {
+        server = await start({ tickMs: 10, game });
+        const code = await newRoom();
+        const ann = await joinAsGuest(code, "ann");
+        const bob = await joinAsGuest(code, "bob");
+        const cat = await joinAsGuest(code, "cat");
+        await until(cat, (m) => m.room.players.length === 3);
+        ann.send({ type: "start_game" });
+        const state = await until(ann, (m) => !!m.room.game);
+        return { code, ann, bob, cat, word: state.room.game!.word! };
+    }
+
+    it("sends chat in the lobby to everyone", async () => {
+        server = await start();
+        const code = await newRoom();
+        const ann = await joinAsGuest(code, "ann");
+        const bob = await joinAsGuest(code, "bob");
+        await until(bob, (m) => m.room.players.length === 2);
+        ann.send({ type: "chat", text: "  hello all  " });
+        for (const client of [ann, bob]) {
+            const m = (await client.nextOfType("chat")) as ChatMsg;
+            expect(m.message).toMatchObject({
+                kind: "chat",
+                name: "ann",
+                text: "hello all",
+                knowsWord: false,
+            });
+        }
+    });
+
+    it("shows a wrong guess to everyone", async () => {
+        const { ann, bob, cat } = await startedGame();
+        bob.send({ type: "chat", text: "zzzzz" });
+        for (const client of [ann, bob, cat]) {
+            expect(
+                ((await client.nextOfType("chat")) as ChatMsg).message,
+            ).toMatchObject({ kind: "chat", text: "zzzzz" });
+        }
+    });
+
+    it("does not show the text of a correct guess, and updates scores", async () => {
+        const { ann, bob, cat, word } = await startedGame();
+        bob.send({ type: "chat", text: word });
+        for (const client of [ann, bob, cat]) {
+            const m = (await client.nextOfType("chat")) as ChatMsg;
+            expect(m.message).toMatchObject({
+                kind: "guessed",
+                name: "bob",
+                text: "",
+            });
+            expect(JSON.stringify(m)).not.toContain(word);
+        }
+        const state = await until(cat, (m) =>
+            m.room.players.some((p) => p.guessed),
+        );
+        const bobView = state.room.players.find((p) => p.name === "bob")!;
+        expect(bobView.guessed).toBe(true);
+        expect(bobView.score).toBeGreaterThanOrEqual(100);
+        // Cat did not guess, so the word is still secret for Cat
+        expect(state.room.game!.word).toBeNull();
+    });
+
+    it("keeps the chat of the drawer away from the guessers", async () => {
+        const { ann, bob, cat } = await startedGame();
+        ann.send({ type: "chat", text: "it is round" });
+        expect(
+            ((await ann.nextOfType("chat")) as ChatMsg).message,
+        ).toMatchObject({ text: "it is round", knowsWord: true });
+        // Messages arrive in order. If Bob and Cat had the drawer's text, they would get it before this one
+        bob.send({ type: "chat", text: "zzzzz" });
+        for (const client of [bob, cat]) {
+            expect(
+                ((await client.nextOfType("chat")) as ChatMsg).message.text,
+            ).toBe("zzzzz");
+        }
+    });
+
+    it("ends the turn when everyone found the word", async () => {
+        const { ann, bob, cat, word } = await startedGame({ drawMs: 60_000 });
+        bob.send({ type: "chat", text: word });
+        cat.send({ type: "chat", text: word.toUpperCase() });
+        const state = await until(ann, (m) => m.room.game?.phase === "reveal");
+        const scores = Object.fromEntries(
+            state.room.players.map((p) => [p.name, p.score]),
+        );
+        expect(scores.ann).toBe(300);
+        expect(scores.bob).toBeGreaterThan(400);
+        expect(scores.cat).toBeGreaterThan(400);
+    });
+
+    it("limits how fast a player can chat", async () => {
+        server = await start();
+        const code = await newRoom();
+        const ann = await joinAsGuest(code, "ann");
+        await ann.nextOfType("room_state");
+        for (let i = 0; i < 6; i++) ann.send({ type: "chat", text: `m${i}` });
+        expect((await ann.nextOfType("error")).code).toBe("rate_limited");
+        // The connection stays open
+        expect(ann.ws.readyState).toBe(ann.ws.OPEN);
+    });
+
+    it.each([
+        ["an empty text", ""],
+        ["a text with a new line", "a\nb"],
+        ["a text that is too long", "x".repeat(101)],
+    ])("rejects %s", async (_label, text) => {
+        server = await start();
+        const ann = await joinAsGuest(await newRoom(), "ann");
+        await ann.nextOfType("room_state");
+        ann.send({ type: "chat", text });
+        expect((await ann.nextOfType("error")).code).toBe("bad_message");
+    });
+
+    it("needs a room first", async () => {
+        server = await start();
+        const client = await connect();
+        client.send({ type: "chat", text: "hi" });
+        expect((await client.nextOfType("error")).code).toBe("not_in_room");
+    });
+
+    it("shows the end screen and saves the game for accounts, not for guests", async () => {
+        server = await start({
+            tickMs: 10,
+            game: { rounds: 1, drawMs: 400, revealMs: 100 },
+        });
+        const amy = await register("Amy_1");
+        const ben = await register("Ben_1");
+        const code = await newRoom();
+        const a = await joinAsGuest(code, "ignored", { cookie: amy.cookie });
+        const b = await joinAsGuest(code, "ignored", { cookie: ben.cookie });
+        const g = await joinAsGuest(code, "guest1");
+        await until(g, (m) => m.room.players.length === 3);
+
+        a.send({ type: "start_game" });
+        const turn1 = await until(a, (m) => !!m.room.game);
+        // Turn 1: Amy draws. Ben guesses at once. The guest does not. The time ends
+        b.send({ type: "chat", text: turn1.room.game!.word! });
+        // The other two turns end by time. Wait for the end screen
+        const end = await until(g, (m) => {
+            return !m.room.game && !!m.room.results;
+        });
+        expect(end.room.results!.players).toHaveLength(3);
+        const ben1 = end.room.results!.players.find((p) => p.name === "Ben_1")!;
+        expect(ben1.rank).toBe(1);
+        expect(
+            end.room.results!.players.find((p) => p.name === "guest1")!.isGuest,
+        ).toBe(true);
+
+        // The server saves in the same moment. Wait a short time for the database
+        let rows: { user_id: number; score: number; rank: number }[] = [];
+        for (let i = 0; i < 50 && rows.length < 2; i++) {
+            await new Promise((r) => setTimeout(r, 20));
+            rows = (
+                await server.db.query<{
+                    user_id: number;
+                    score: number;
+                    rank: number;
+                }>(
+                    "select user_id, score, rank from game_players order by rank, user_id",
+                )
+            ).rows;
+        }
+        expect(rows.map((r) => r.user_id).sort()).toEqual(
+            [amy.id, ben.id].sort(),
+        );
+        expect(rows.find((r) => r.user_id === ben.id)).toMatchObject({
+            rank: 1,
+        });
+        expect(
+            (await server.db.query("select 1 from games")).rows,
+        ).toHaveLength(1);
+    }, 20_000);
+});
