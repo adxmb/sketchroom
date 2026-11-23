@@ -32,7 +32,7 @@ export function RoomPage({ session }: { session: Session }) {
                 <NameForm
                     initial=""
                     button="Join"
-                    onSumbit={(name) => {
+                    onSubmit={(name) => {
                         saveGuestName(name);
                         setGuestName(name);
                     }}
@@ -63,7 +63,8 @@ function Lobby({
     onChangeName: () => void;
 }) {
     const navigate = useNavigate();
-    const { state, leave, startGame } = useRoom(code, name);
+    const { state, leave, startGame, drawLocal, drawSend, undo, clearCanvas } =
+        useRoom(code, name);
     const [copied, setCopied] = useState(false);
 
     const copyLink = async () => {
@@ -154,6 +155,13 @@ function Lobby({
                     room={room}
                     game={room.game}
                     myId={state.playerId}
+                    board={{
+                        strokes: state.strokes,
+                        onLocal: drawLocal,
+                        onSend: drawSend,
+                        onUndo: undo,
+                        onClear: clearCanvas,
+                    }}
                 />
             ) : (
                 <>

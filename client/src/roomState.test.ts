@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { initialRoomState, roomReducer, type RoomState } from "./roomState";
+import type { ServerMessage } from "../../server/src/protocol";
 
 const room = {
     code: "ABCDE",
@@ -95,5 +96,139 @@ describe("roomReducer", () => {
         });
         s = roomReducer(s, { type: "connecting" });
         expect(s).toEqual(initialRoomState);
+    });
+    describe("drawing", () => {
+        const chunk = (id: number, extra = {}) => ({
+            id,
+            colour: 0,
+            size: 0,
+            points: [[1, 1]] as [number, number][],
+            ...extra,
+        });
+        const inGame = (turn: number) => ({
+            ...room,
+            game: {
+                phase: "drawing" as const,
+                turn,
+                totalTurns: 4,
+                drawerId: "p1",
+                hint: "_____",
+                word: null,
+                msLeft: 1000,
+            },
+        });
+        const msg = (message: ServerMessage) =>
+            ({ type: "message", message }) as const;
+
+        it("adds strokes from the server", () => {
+            let s = roomReducer(
+                initialRoomState,
+                msg({ type: "draw", stroke: chunk(0) }),
+            );
+            s = roomReducer(
+                s,
+                msg({
+                    type: "draw",
+                    stroke: chunk(0, { points: [[2, 2]], done: true }),
+                }),
+            );
+            expect(s.strokes).toHaveLength(1);
+            expect(s.strokes[0]).toMatchObject({
+                points: [
+                    [1, 1],
+                    [2, 2],
+                ],
+                done: true,
+            });
+        });
+
+        it("replaces the drawing with a canvas message", () => {
+            let s = roomReducer(
+                initialRoomState,
+                msg({ type: "draw", stroke: chunk(0) }),
+            );
+            s = roomReducer(s, msg({ type: "canvas", strokes: [] }));
+            expect(s.strokes).toEqual([]);
+        });
+
+        it("keeps the drawing when the same turn sends a new state", () => {
+            let s = roomReducer(
+                initialRoomState,
+                msg({ type: "room_state", room: inGame(1) }),
+            );
+            s = roomReducer(s, msg({ type: "draw", stroke: chunk(0) }));
+            s = roomReducer(s, msg({ type: "room_state", room: inGame(1) }));
+            expect(s.strokes).toHaveLength(1);
+        });
+
+        it("clears the drawing in a new turn and when the game ends", () => {
+            let s = roomReducer(
+                initialRoomState,
+                msg({ type: "room_state", room: inGame(1) }),
+            );
+            s = roomReducer(s, msg({ type: "draw", stroke: chunk(0) }));
+            expect(
+                roomReducer(s, msg({ type: "room_state", room: inGame(2) }))
+                    .strokes,
+            ).toEqual([]);
+            expect(
+                roomReducer(s, msg({ type: "room_state", room })).strokes,
+            ).toEqual([]);
+        });
+
+        it("keeps the canvas that comes after the room state for a new player", () => {
+            let s = roomReducer(
+                initialRoomState,
+                msg({ type: "room_state", room: inGame(1) }),
+            );
+            s = roomReducer(
+                s,
+                msg({
+                    type: "canvas",
+                    strokes: [
+                        {
+                            id: 0,
+                            colour: 0,
+                            size: 0,
+                            points: [[1, 1]],
+                            done: true,
+                        },
+                    ],
+                }),
+            );
+            expect(s.strokes).toHaveLength(1);
+        });
+
+        it("shows the drawer's own strokes, undo and clear at once", () => {
+            let s = roomReducer(initialRoomState, {
+                type: "local_chunk",
+                chunk: chunk(0, { done: true }),
+            });
+            s = roomReducer(s, {
+                type: "local_chunk",
+                chunk: chunk(1, { done: true }),
+            });
+            expect(s.strokes).toHaveLength(2);
+            s = roomReducer(s, { type: "local_undo" });
+            expect(s.strokes.map((x) => x.id)).toEqual([0]);
+            s = roomReducer(s, { type: "local_clear" });
+            expect(s.strokes).toEqual([]);
+        });
+
+        it("does not show a notice when a stroke comes too late", () => {
+            let s = roomReducer(
+                initialRoomState,
+                msg({ type: "room_state", room }),
+            );
+            s = roomReducer(
+                s,
+                msg({
+                    type: "error",
+                    code: "not_drawer",
+                    message: "You cannot draw now",
+                }),
+            );
+            expect(s.error).toBeNull();
+        });
     });
 });

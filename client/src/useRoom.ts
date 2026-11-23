@@ -2,9 +2,9 @@ import { useEffect, useReducer, useRef } from "react";
 import {
     clientMessageSchema,
     type ClientMessage,
+    type StrokeChunk,
 } from "../../server/src/protocol";
 import { initialRoomState, roomReducer } from "./roomState";
-import { send } from "vite";
 
 function socketUrl() {
     const scheme = window.location.protocol === "https:" ? "wss" : "ws";
@@ -56,5 +56,17 @@ export function useRoom(code: string, name: string | null) {
         state,
         leave: () => sendMessage({ type: "leave_room" }),
         startGame: () => sendMessage({ type: "start_game" }),
+        drawLocal: (chunk: StrokeChunk) =>
+            dispatch({ type: "local_chunk", chunk }),
+        drawSend: (stroke: StrokeChunk) =>
+            sendMessage({ type: "draw", stroke }),
+        undo: () => {
+            dispatch({ type: "local_undo" });
+            sendMessage({ type: "undo_stroke" });
+        },
+        clearCanvas: () => {
+            dispatch({ type: "local_clear" });
+            sendMessage({ type: "clear_canvas" });
+        },
     };
 }

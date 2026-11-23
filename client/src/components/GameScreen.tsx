@@ -1,15 +1,31 @@
-import type { GameView, RoomView } from "../../../server/src/protocol";
+import type {
+    GameView,
+    RoomView,
+    Stroke,
+    StrokeChunk,
+} from "../../../server/src/protocol";
 import { secondsLeft, useCountdown } from "../countdown";
+import { DrawingBoard } from "./DrawingBoard";
 import { PlayerList } from "./PlayerList";
+
+export interface BoardActions {
+    strokes: Stroke[];
+    onLocal: (chunk: StrokeChunk) => void;
+    onSend: (chunk: StrokeChunk) => void;
+    onUndo: () => void;
+    onClear: () => void;
+}
 
 export function GameScreen({
     room,
     game,
     myId,
+    board,
 }: {
     room: RoomView;
     game: GameView;
     myId: string | null;
+    board: BoardActions;
 }) {
     const ms = useCountdown(game.msLeft, room);
     const drawer = room.players.find((p) => p.id === game.drawerId);
@@ -56,8 +72,8 @@ export function GameScreen({
                 )}
             </section>
 
-            <section className="card board" aria-label="Drawing board">
-                <p className="muted">Drawing board comes next</p>
+            <section className="card board">
+                <DrawingBoard {...board} canDraw={iDraw && !reveal} />
             </section>
 
             <section className="card">

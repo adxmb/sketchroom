@@ -12,12 +12,12 @@ export function checkName(name: string): string | null {
 export function NameForm({
     initial,
     button,
-    onSumbit,
+    onSubmit,
     note,
 }: {
     initial: string;
     button: string;
-    onSumbit: (name: string) => void;
+    onSubmit: (name: string) => void;
     note?: string;
 }) {
     const [name, setName] = useState(initial);
@@ -27,7 +27,7 @@ export function NameForm({
         e.preventDefault();
         const problem = checkName(name);
         setError(problem);
-        if (!problem) onSumbit(name);
+        if (!problem) onSubmit(name);
     };
 
     return (

@@ -55,7 +55,7 @@ export function Home({ session }: { session: Session }) {
                     <NameForm
                         initial={loadGuestName()}
                         button="Create room"
-                        onSumbit={create}
+                        onSubmit={create}
                     />
                 )}
                 <p className="muted small-note">
