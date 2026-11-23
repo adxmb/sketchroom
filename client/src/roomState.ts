@@ -45,7 +45,9 @@ export function roomReducer(state: RoomState, event: RoomEvent): RoomState {
                 case "left":
                     return { ...state, status: "closed", room: null };
                 case "error":
-                    return { ...state, status: "error", error: msg.message };
+                    return state.room
+                        ? { ...state, error: msg.message }
+                        : { ...state, status: "error", error: msg.message };
             }
         }
     }

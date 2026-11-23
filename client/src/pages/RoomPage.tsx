@@ -2,6 +2,8 @@ import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { roomCodeSchema } from "../../../server/src/protocol";
 import { NameForm, checkName } from "../components/NameForm";
+import { GameScreen } from "../components/GameScreen";
+import { PlayerList } from "../components/PlayerList";
 import { loadGuestName, saveGuestName } from "../guestName";
 import { useRoom } from "../useRoom";
 import type { Session } from "../useSession";
@@ -61,7 +63,7 @@ function Lobby({
     onChangeName: () => void;
 }) {
     const navigate = useNavigate();
-    const { state, leave } = useRoom(code, name);
+    const { state, leave, startGame } = useRoom(code, name);
     const [copied, setCopied] = useState(false);
 
     const copyLink = async () => {
@@ -115,7 +117,9 @@ function Lobby({
     if (state.status === "connecting" || !state.room)
         return <p className="muted">Connecting...</p>;
 
-    const me = state.room.players.find((p) => p.id === state.playerId);
+    const room = state.room;
+    const me = room.players.find((p) => p.id === state.playerId);
+    const canStart = !!me?.isHost && room.players.length >= 2;
 
     return (
         <>
@@ -126,7 +130,7 @@ function Lobby({
                         className="room-code"
                         aria-label={`Room code ${code.split("").join(" ")}`}
                     >
-                        {state.room.code}
+                        {room.code}
                     </h1>
                 </div>
                 <div className="row">
@@ -139,43 +143,48 @@ function Lobby({
                 </div>
             </header>
 
-            <section className="card">
-                <h2>
-                    Players{" "}
-                    <span className="muted">({state.room.players.length})</span>
-                </h2>
-                <ul className="players">
-                    {state.room.players.map((p) => (
-                        <li key={p.id}>
-                            <span className="avatar" aria-hidden="true">
-                                {p.name.slice(0, 1).toUpperCase()}
-                            </span>
-                            <span className="player-name">{p.name}</span>
-                            {p.id === me?.id && (
-                                <span className="badge">You</span>
-                            )}
-                            {p.isHost && (
-                                <span className="badge host">Host</span>
-                            )}
-                            {p.isGuest && (
-                                <span className="badge quiet">Guest</span>
-                            )}
-                        </li>
-                    ))}
-                </ul>
-            </section>
-
-            <section className="card">
-                <button className="btn primary" disabled>
-                    Start game
-                </button>
-                <p className="muted small-note">
-                    {me?.isHost
-                        ? "You are the host. "
-                        : "Waiting for the host. "}
-                    The game itself comes next.
+            {state.error && (
+                <p className="error" role="alert">
+                    {state.error}
                 </p>
-            </section>
+            )}
+
+            {room.game ? (
+                <GameScreen
+                    room={room}
+                    game={room.game}
+                    myId={state.playerId}
+                />
+            ) : (
+                <>
+                    <section className="card">
+                        <h2>
+                            Players{" "}
+                            <span className="muted">
+                                ({room.players.length})
+                            </span>
+                        </h2>
+                        <PlayerList room={room} myId={state.playerId} />
+                    </section>
+
+                    <section className="card">
+                        <button
+                            className="btn primary"
+                            disabled={!canStart}
+                            onClick={startGame}
+                        >
+                            Start game
+                        </button>
+                        <p className="muted small-note">
+                            {!me?.isHost
+                                ? "Waiting for the host to start the game."
+                                : room.players.length < 2
+                                  ? "You need at least 2 players. Share the room code."
+                                  : "Everyone draws a word. The others guess it."}
+                        </p>
+                    </section>
+                </>
+            )}
         </>
     );
 }

@@ -54,19 +54,16 @@ Server to client: `room_state`, `player_joined`, `player_left`, `round_start`
 (the drawer gets the word, the others get its length), `stroke`, `guess_result`,
 `round_end`, `game_end`, `error`.
 
-## Plan
-
-1. Day 1: repository, CI, database tables, register and login. (done)
-2. Day 2: React client, WebSocket connection, rooms, join code, lobby.
-3. Day 3: game loop on the server: turn order, secret word, timer, round end.
-4. Day 4: drawing. The drawer sends strokes. The server sends them to the others.
-5. Day 5: guessing, chat, scoring, end-of-game screen. Save scores for accounts.
-6. Day 6: reconnect after a lost connection, limits, more tests.
-7. Day 7: deploy, README, screenshots, a short demo clip.
-
 ## Reference Notes
 
 - Guests have no database rows. A guest name is unique in one room, ignoring letter case. A guest cannot use the name of an account
 - A room is removed 10 minutes after creation if nobody joins. A room is removed 60 seconds after its last player leaves
 - Rooms live in server memory. A server restart ends all rooms. Many servers would need a shared store such as Redis
 - The server checks the Origin header on every WebSocket connection
+
+- A game has rounds. Each player draws once in each round. There are 2 rounds. A turn has 60 seconds of drawing and 5 seconds of reveal
+- The server holds all game state. A timer ticks every 500 ms. The server sends msLeft, not a clock time
+- Each player gets their own copy of the room state. Only the drawer gets the secret word. After the turn, everyone gets it
+- If the drawer leaves, the turn ends at once. If fewer than 2 players are left, the game stops
+- A player who joins in the middle of a game can guess but does not draw until the next game
+- Words are in the words table in Postgres. The server picks random words at the start of a game

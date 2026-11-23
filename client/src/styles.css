@@ -231,3 +231,30 @@ a:focus-visible {
     border: 1px solid var(--line);
     font-weight: 600;
 }
+
+.badge.draw {
+    background: #b45309;
+    color: #ffffff;
+}
+.timer {
+    margin: 0;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    font-size: 1.3rem;
+}
+.word {
+    font-size: clamp(1.6rem, 7vw, 2.2rem);
+    font-weight: 700;
+    margin: 4px 0 0;
+    overflow-wrap: anywhere;
+}
+.hint {
+    letter-spacing: 0.25em;
+    white-space: pre-wrap;
+}
+.board {
+    min-height: 220px;
+    display: grid;
+    place-items: center;
+    text-align: center;
+}

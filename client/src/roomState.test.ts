@@ -8,6 +8,31 @@ const room = {
     game: null,
 };
 
+it("keeps the room when an error comes after the join", () => {
+    let s = roomReducer(initialRoomState, {
+        type: "message",
+        message: { type: "room_state", room },
+    });
+    s = roomReducer(s, {
+        type: "message",
+        message: {
+            type: "error",
+            code: "not_host",
+            message: "Only the host can start the game",
+        },
+    });
+    expect(s).toMatchObject({
+        status: "joined",
+        error: "Only the host can start the game",
+    });
+    // The next room state clears the notice
+    s = roomReducer(s, {
+        type: "message",
+        message: { type: "room_state", room },
+    });
+    expect(s.error).toBeNull();
+});
+
 describe("roomReducer", () => {
     it("starts in the connecting state", () => {
         expect(initialRoomState.status).toBe("connecting");

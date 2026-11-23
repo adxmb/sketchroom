@@ -4,6 +4,7 @@ import {
     type ClientMessage,
 } from "../../server/src/protocol";
 import { initialRoomState, roomReducer } from "./roomState";
+import { send } from "vite";
 
 function socketUrl() {
     const scheme = window.location.protocol === "https:" ? "wss" : "ws";
@@ -46,11 +47,14 @@ export function useRoom(code: string, name: string | null) {
         };
     }, [code, name]);
 
-    const leave = () => {
-        const message: ClientMessage = { type: "leave_room" };
+    const sendMessage = (message: ClientMessage) => {
         if (clientMessageSchema.safeParse(message).success)
             socketRef.current?.send(JSON.stringify(message));
     };
 
-    return { state, leave };
+    return {
+        state,
+        leave: () => sendMessage({ type: "leave_room" }),
+        startGame: () => sendMessage({ type: "start_game" }),
+    };
 }
