@@ -8,6 +8,9 @@ it("runs each migration once", async () => {
     const { rows } = await db.query<{ name: string }>(
         "select name from schema_migrations",
     );
-    expect(rows.map((r) => r.name)).toEqual(["001_users_sessions.sql"]);
+    expect(rows.map((r) => r.name)).toEqual([
+        "001_users_sessions.sql",
+        "002_words.sql",
+    ]);
     await db.close();
 });
