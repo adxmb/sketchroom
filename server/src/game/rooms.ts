@@ -1,16 +1,26 @@
 import { randomInt, randomUUID } from "node:crypto";
 import {
+    GameView,
     MAX_PLAYERS,
     ROOM_CODE_ALPHABET,
     type Mode,
     type RoomView,
 } from "../protocol.js";
+import { buildOrder, maskWord, nextTurn } from "./rules.js";
 
 export interface Player {
     id: string;
     name: string;
     /** account id is null for guests */
     userId: number | null;
+}
+
+interface Game {
+    order: string[];
+    words: string[];
+    turn: number;
+    phase: "drawing" | "reveal";
+    endsAt: number;
 }
 
 interface Room {
@@ -22,8 +32,14 @@ interface Room {
     everJoined: boolean;
     /** When the final player leaves, null if still occupied */
     emptySince: number | null;
+    game: Game | null;
 }
 
+export type StartError =
+    | "room_not_found"
+    | "not_host"
+    | "game_running"
+    | "not_enough_players";
 export type JoinError = "room_not_found" | "room_full" | "name_taken";
 export type JoinResult =
     | { ok: true; player: Player; room: RoomView }
@@ -36,6 +52,10 @@ export interface RoomManagerOptions {
     unusedTtlMs?: number;
     /** A room that is empty is removed after this time */
     emptyTtlMs?: number;
+    rounds?: number;
+    minPlayers?: number;
+    drawMs?: number;
+    revealMs?: number;
     now?: () => number;
     makeCode?: () => string;
 }
@@ -56,6 +76,10 @@ export class RoomManager {
     private maxPlayers: number;
     private unusedTtlMs: number;
     private emptyTtlMs: number;
+    private rounds: number;
+    private minPlayers: number;
+    private drawMs: number;
+    private revealMs: number;
     private now: () => number;
     private makeCode: () => string;
 
@@ -64,12 +88,20 @@ export class RoomManager {
         this.maxPlayers = opts.maxPlayers ?? MAX_PLAYERS;
         this.unusedTtlMs = opts.unusedTtlMs ?? 10 * 60 * 1000;
         this.emptyTtlMs = opts.emptyTtlMs ?? 60 * 1000;
+        this.rounds = opts.rounds ?? 2;
+        this.minPlayers = opts.minPlayers ?? 2;
+        this.drawMs = opts.drawMs ?? 60_000;
+        this.revealMs = opts.revealMs ?? 5_000;
         this.now = opts.now ?? Date.now;
         this.makeCode = opts.makeCode ?? randomCode;
     }
 
     get size(): number {
         return this.rooms.size;
+    }
+
+    get wordsNeeded(): number {
+        return this.maxPlayers * this.rounds;
     }
 
     createRoom(
@@ -90,6 +122,7 @@ export class RoomManager {
             createdAt: this.now(),
             everJoined: false,
             emptySince: null,
+            game: null,
         });
         return { ok: true, code };
     }
@@ -132,12 +165,76 @@ export class RoomManager {
             // First player joining of those remaining is host
             room.hostId = room.players.keys().next().value ?? null;
         }
+        this.afterLeave(room, playerId);
         return this.toView(room);
     }
 
-    view(code: string): RoomView | null {
+    /** Check that this player can start a game now */
+    startError(code: string, playerId: string): StartError | null {
         const room = this.rooms.get(code);
-        return room ? this.toView(room) : null;
+        if (!room) return "room_not_found";
+        if (room.hostId !== playerId) return "not_host";
+        if (room.game) return "game_running";
+        if (room.players.size < this.minPlayers) return "not_enough_players";
+        return null;
+    }
+
+    startGame(
+        code: string,
+        playerId: string,
+        words: string[],
+    ): { ok: true } | { ok: false; error: StartError } {
+        const error = this.startError(code, playerId);
+        if (error) return { ok: false, error };
+        const room = this.rooms.get(code)!;
+        const order = buildOrder([...room.players.keys()], this.rounds).slice(
+            0,
+            words.length,
+        );
+        if (order.length === 0)
+            return { ok: false, error: "not_enough_players" };
+        room.game = {
+            order,
+            words,
+            turn: 0,
+            phase: "drawing",
+            endsAt: this.now() + this.drawMs,
+        };
+        return { ok: true };
+    }
+
+    /** Move game forwards when a timer ends */
+    tick(): string[] {
+        const now = this.now();
+        const changed: string[] = [];
+        for (const room of this.rooms.values()) {
+            const game = room.game;
+            if (!game || now < game.endsAt) continue;
+            if (game.phase === "drawing") {
+                game.phase = "reveal";
+                game.endsAt = now + this.revealMs;
+            } else {
+                const next = nextTurn(
+                    game.order,
+                    game.turn,
+                    new Set(room.players.keys()),
+                );
+                if (next === null) {
+                    room.game = null;
+                } else {
+                    game.turn = next;
+                    game.phase = "drawing";
+                    game.endsAt = now + this.drawMs;
+                }
+            }
+            changed.push(room.code);
+        }
+        return changed;
+    }
+
+    view(code: string, viewerId: string | null = null): RoomView | null {
+        const room = this.rooms.get(code);
+        return room ? this.toView(room, viewerId) : null;
     }
 
     /** Remove empty rooms */
@@ -155,7 +252,36 @@ export class RoomManager {
         return removed;
     }
 
-    private toView(room: Room): RoomView {
+    private afterLeave(room: Room, playerId: string) {
+        const game = room.game;
+        if (!game) return;
+        if (room.players.size < this.minPlayers) {
+            room.game = null;
+        } else if (
+            game.phase === "drawing" &&
+            game.order[game.turn] === playerId
+        ) {
+            game.phase = "reveal";
+            game.endsAt = this.now() + this.revealMs;
+        }
+    }
+
+    private gameView(game: Game, viewerId: string | null): GameView {
+        const word = game.words[game.turn]!;
+        const drawerId = game.order[game.turn]!;
+        const canSee = game.phase === "reveal" || viewerId === drawerId;
+        return {
+            phase: game.phase,
+            turn: game.turn + 1,
+            totalTurns: game.order.length,
+            drawerId,
+            hint: maskWord(word),
+            word: canSee ? word : null,
+            msLeft: Math.max(0, game.endsAt - this.now()),
+        };
+    }
+
+    private toView(room: Room, viewerId: string | null = null): RoomView {
         return {
             code: room.code,
             mode: room.mode,
@@ -165,6 +291,7 @@ export class RoomManager {
                 isGuest: p.userId === null,
                 isHost: p.id === room.hostId,
             })),
+            game: room.game ? this.gameView(room.game, viewerId) : null,
         };
     }
 }

@@ -152,3 +152,185 @@ describe("RoomManager", () => {
         });
     });
 });
+
+describe("games", () => {
+    const WORDS = ["apple", "ice cream", "robot", "tiger"];
+
+    /** A room with the given players. `now` is a clock that the test controls */
+    function gameSetup(
+        names: string[],
+        opts: { rounds?: number; minPlayers?: number } = {},
+    ) {
+        const clock = { now: 1_000 };
+        const manager = new RoomManager({
+            now: () => clock.now,
+            makeCode: counterCodes(),
+            drawMs: 60_000,
+            revealMs: 5_000,
+            rounds: 1,
+            ...opts,
+        });
+        const created = manager.createRoom("compete");
+        if (!created.ok) throw new Error();
+        const ids = names.map((name) => {
+            const r = manager.join(created.code, { name, userId: null });
+            if (!r.ok) throw new Error();
+            return r.player.id;
+        });
+        return { manager, code: created.code, ids, clock };
+    }
+
+    it("lets only the host start, and only with enough players", () => {
+        const { manager, code, ids } = gameSetup(["ann", "bob"]);
+        expect(manager.startGame(code, ids[1]!, WORDS)).toEqual({
+            ok: false,
+            error: "not_host",
+        });
+        expect(manager.startGame("ZZZZZ", ids[0]!, WORDS)).toEqual({
+            ok: false,
+            error: "room_not_found",
+        });
+        expect(manager.startGame(code, ids[0]!, WORDS)).toEqual({ ok: true });
+        expect(manager.startGame(code, ids[0]!, WORDS)).toEqual({
+            ok: false,
+            error: "game_running",
+        });
+
+        const alone = gameSetup(["ann"]);
+        expect(
+            alone.manager.startGame(alone.code, alone.ids[0]!, WORDS),
+        ).toEqual({
+            ok: false,
+            error: "not_enough_players",
+        });
+    });
+
+    it("shows the secret word only to the drawer", () => {
+        const { manager, code, ids } = gameSetup(["ann", "bob", "cat"]);
+        manager.startGame(code, ids[0]!, WORDS);
+        const forDrawer = manager.view(code, ids[0]!)!.game!;
+        const forGuesser = manager.view(code, ids[1]!)!.game!;
+        const forNobody = manager.view(code)!.game!;
+        expect(forDrawer).toMatchObject({
+            phase: "drawing",
+            turn: 1,
+            totalTurns: 3,
+            drawerId: ids[0],
+            word: "apple",
+        });
+        expect(forGuesser.word).toBeNull();
+        expect(forNobody.word).toBeNull();
+        expect(forGuesser.hint).toBe("_____");
+        expect(JSON.stringify(forGuesser)).not.toContain("apple");
+    });
+
+    it("counts down the time that is left", () => {
+        const { manager, code, ids, clock } = gameSetup(["ann", "bob"]);
+        manager.startGame(code, ids[0]!, WORDS);
+        expect(manager.view(code)!.game!.msLeft).toBe(60_000);
+        clock.now += 20_000;
+        expect(manager.view(code)!.game!.msLeft).toBe(40_000);
+    });
+
+    it("does nothing on a tick before the timer ends", () => {
+        const { manager, code, ids, clock } = gameSetup(["ann", "bob"]);
+        manager.startGame(code, ids[0]!, WORDS);
+        clock.now += 59_999;
+        expect(manager.tick()).toEqual([]);
+    });
+
+    it("goes through reveal and turns, then back to the lobby", () => {
+        const { manager, code, ids, clock } = gameSetup(["ann", "bob"]);
+        manager.startGame(code, ids[0]!, WORDS);
+
+        clock.now += 60_000;
+        expect(manager.tick()).toEqual([code]);
+        // Reveal: everyone can see the word
+        expect(manager.view(code, ids[1]!)!.game).toMatchObject({
+            phase: "reveal",
+            word: "apple",
+            msLeft: 5_000,
+        });
+
+        clock.now += 5_000;
+        expect(manager.tick()).toEqual([code]);
+        expect(manager.view(code, ids[1]!)!.game).toMatchObject({
+            phase: "drawing",
+            turn: 2,
+            drawerId: ids[1],
+            word: "ice cream",
+            hint: "___ _____",
+        });
+        expect(manager.view(code, ids[0]!)!.game!.word).toBeNull();
+
+        clock.now += 60_000;
+        manager.tick();
+        clock.now += 5_000;
+        manager.tick();
+        expect(manager.view(code)!.game).toBeNull();
+        // The host can start again
+        expect(manager.startGame(code, ids[0]!, WORDS)).toEqual({ ok: true });
+    });
+
+    it("uses the rounds setting", () => {
+        const { manager, code, ids } = gameSetup(["ann", "bob"], { rounds: 2 });
+        manager.startGame(code, ids[0]!, WORDS);
+        expect(manager.view(code)!.game!.totalTurns).toBe(4);
+    });
+
+    it("has no more turns than words", () => {
+        const { manager, code, ids } = gameSetup(["ann", "bob", "cat"], {
+            rounds: 2,
+        });
+        manager.startGame(code, ids[0]!, ["apple", "robot"]);
+        expect(manager.view(code)!.game!.totalTurns).toBe(2);
+    });
+
+    it("ends the turn at once when the drawer leaves", () => {
+        const { manager, code, ids, clock } = gameSetup(["ann", "bob", "cat"]);
+        manager.startGame(code, ids[0]!, WORDS);
+        manager.leave(code, ids[0]!);
+        expect(manager.view(code, ids[1]!)!.game).toMatchObject({
+            phase: "reveal",
+            word: "apple",
+            msLeft: 5_000,
+        });
+        clock.now += 5_000;
+        manager.tick();
+        expect(manager.view(code, ids[1]!)!.game).toMatchObject({
+            phase: "drawing",
+            drawerId: ids[1],
+        });
+    });
+
+    it("does not end the turn when a guesser leaves", () => {
+        const { manager, code, ids } = gameSetup(["ann", "bob", "cat"]);
+        manager.startGame(code, ids[0]!, WORDS);
+        manager.leave(code, ids[2]!);
+        expect(manager.view(code)!.game).toMatchObject({
+            phase: "drawing",
+            drawerId: ids[0],
+        });
+    });
+
+    it("skips the turns of a player who left", () => {
+        const { manager, code, ids, clock } = gameSetup(["ann", "bob", "cat"]);
+        manager.startGame(code, ids[0]!, WORDS);
+        manager.leave(code, ids[1]!);
+        clock.now += 60_000;
+        manager.tick();
+        clock.now += 5_000;
+        manager.tick();
+        expect(manager.view(code, ids[2]!)!.game).toMatchObject({
+            drawerId: ids[2],
+            turn: 3,
+        });
+    });
+
+    it("stops the game when too few players are left", () => {
+        const { manager, code, ids } = gameSetup(["ann", "bob"]);
+        manager.startGame(code, ids[0]!, WORDS);
+        manager.leave(code, ids[1]!);
+        expect(manager.view(code)!.game).toBeNull();
+    });
+});

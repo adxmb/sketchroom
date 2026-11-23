@@ -35,6 +35,7 @@ export const clientMessageSchema = z.discriminatedUnion("type", [
         name: usernameSchema.optional(),
     }),
     z.object({ type: z.literal("leave_room") }),
+    z.object({ type: z.literal("start_game") }),
 ]);
 export type ClientMessage = z.infer<typeof clientMessageSchema>;
 
@@ -46,10 +47,22 @@ export interface PlayerView {
     isHost: boolean;
 }
 
+export interface GameView {
+    phase: "drawing" | "reveal";
+    turn: number;
+    totalTurns: number;
+    drawerId: string;
+    hint: string;
+    word: string | null;
+    msLeft: number;
+}
+
 export interface RoomView {
     code: string;
     mode: Mode;
     players: PlayerView[];
+    // Null while in lobby
+    game: GameView | null;
 }
 
 export type ErrorCode =
@@ -60,6 +73,11 @@ export type ErrorCode =
     | "name_reserved"
     | "name_required"
     | "already_joined"
+    | "not_in_room"
+    | "not_host"
+    | "not_enough_players"
+    | "game_running"
+    | "server_error"
     | "rate_limited";
 
 export type ServerMessage =
