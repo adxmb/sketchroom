@@ -18,6 +18,7 @@ export interface AppOptions {
     rooms?: RoomManager;
     messagesPerSecond?: number;
     createRoomLimit?: number;
+    tickMs?: number;
     logger?: boolean;
 }
 
@@ -40,6 +41,7 @@ export async function buildApp(opts: AppOptions) {
         allowedOrigins: opts.allowedOrigins ?? [],
         messagesPerSecond: opts.messagesPerSecond ?? 30,
         createRoomLimit: opts.createRoomLimit ?? 20,
+        tickMs: opts.tickMs ?? 500,
     });
     app.get("/health", async () => ({ status: "ok" }));
     return app;

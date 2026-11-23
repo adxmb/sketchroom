@@ -2,7 +2,7 @@ import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import WebSocket from "ws";
 import { buildApp } from "../src/app.js";
-import { RoomManager } from "../src/game/rooms.js";
+import { RoomManager, type RoomManagerOptions } from "../src/game/rooms.js";
 import { originAllowed } from "../src/game/gateway.js";
 import type { ServerMessage } from "../src/protocol.js";
 import { createTestDb } from "./helpers.js";
@@ -23,10 +23,15 @@ async function start(
         maxPlayers?: number;
         messagesPerSecond?: number;
         allowedOrigins?: string[];
+        game?: RoomManagerOptions;
+        tickMs?: number;
     } = {},
 ) {
     const db = await createTestDb();
-    const rooms = new RoomManager({ maxPlayers: opts.maxPlayers });
+    const rooms = new RoomManager({
+        maxPlayers: opts.maxPlayers,
+        ...opts.game,
+    });
     const app = await buildApp({
         db,
         rooms,
@@ -34,6 +39,7 @@ async function start(
         createRoomLimit: 1000,
         messagesPerSecond: opts.messagesPerSecond,
         allowedOrigins: opts.allowedOrigins,
+        tickMs: opts.tickMs,
     });
     await app.listen({ port: 0, host: "127.0.0.1" });
     const port = (app.server.address() as AddressInfo).port;
@@ -366,5 +372,122 @@ describe("origin check", () => {
         expect(originAllowed("https://b.com", "a.com", ["https://b.com"])).toBe(
             true,
         );
+    });
+});
+
+describe("games", () => {
+    type RoomMessage = Extract<ServerMessage, { type: "room_state" }>;
+
+    /** Two players in a room. Ann is the host */
+    async function twoPlayers(game: RoomManagerOptions = {}) {
+        server = await start({ game, tickMs: 10 });
+        const code = await newRoom();
+        const ann = await joinAsGuest(code, "ann");
+        const bob = await joinAsGuest(code, "bob");
+        await ann.nextOfType("room_state");
+        // Wait until Bob sees both players
+        for (;;) {
+            if ((await bob.nextOfType("room_state")).room.players.length === 2)
+                break;
+        }
+        return { code, ann, bob };
+    }
+
+    async function nextGameState(client: Client): Promise<RoomMessage> {
+        for (;;) {
+            const m = await client.nextOfType("room_state");
+            if (m.room.game) return m;
+        }
+    }
+
+    it("starts a game and keeps the word secret", async () => {
+        const { ann, bob } = await twoPlayers();
+        ann.send({ type: "start_game" });
+        const forAnn = await nextGameState(ann);
+        const forBob = await nextGameState(bob);
+
+        const secret = forAnn.room.game!.word;
+        expect(secret).toBeTypeOf("string");
+        expect(forAnn.room.game).toMatchObject({
+            phase: "drawing",
+            turn: 1,
+            totalTurns: 4,
+        });
+        expect(forBob.room.game!.word).toBeNull();
+        expect(forBob.room.game!.hint).toHaveLength(secret!.length);
+        expect(JSON.stringify(forBob.room)).not.toContain(secret!);
+        expect(forAnn.room.game!.drawerId).toBe(forAnn.room.players[0]!.id);
+    });
+
+    it("does not let a guest who is not the host start", async () => {
+        const { bob } = await twoPlayers();
+        bob.send({ type: "start_game" });
+        expect((await bob.nextOfType("error")).code).toBe("not_host");
+    });
+
+    it("needs two players", async () => {
+        server = await start();
+        const ann = await joinAsGuest(await newRoom(), "ann");
+        await ann.nextOfType("room_state");
+        ann.send({ type: "start_game" });
+        expect((await ann.nextOfType("error")).code).toBe("not_enough_players");
+    });
+
+    it("needs a room first", async () => {
+        server = await start();
+        const client = await connect();
+        client.send({ type: "start_game" });
+        expect((await client.nextOfType("error")).code).toBe("not_in_room");
+    });
+
+    it("does not start a second game", async () => {
+        const { ann } = await twoPlayers();
+        ann.send({ type: "start_game" });
+        await nextGameState(ann);
+        ann.send({ type: "start_game" });
+        expect((await ann.nextOfType("error")).code).toBe("game_running");
+    });
+
+    it("plays all turns with the timers, then goes back to the lobby", async () => {
+        const { ann, bob } = await twoPlayers({
+            rounds: 1,
+            drawMs: 120,
+            revealMs: 60,
+        });
+        ann.send({ type: "start_game" });
+
+        // Old lobby states can still be in the queue. Start at the first game state
+        const first = (await nextGameState(ann)).room.game!;
+        const seen: string[] = [`${first.turn}:${first.phase}`];
+        for (;;) {
+            const g = (await ann.nextOfType("room_state")).room.game;
+            if (!g) break;
+            seen.push(`${g.turn}:${g.phase}`);
+        }
+        expect(seen).toEqual([
+            "1:drawing",
+            "1:reveal",
+            "2:drawing",
+            "2:reveal",
+        ]);
+
+        // The game is over. Now the host can start again
+        ann.send({ type: "start_game" });
+        expect((await nextGameState(ann)).room.game!.turn).toBe(1);
+        bob.ws.close();
+    });
+
+    it("stops the game when the other player disconnects", async () => {
+        const { ann, bob } = await twoPlayers();
+        ann.send({ type: "start_game" });
+        await nextGameState(ann);
+        bob.ws.close();
+        for (;;) {
+            const m = await ann.nextOfType("room_state");
+            if (m.room.players.length === 1) {
+                expect(m.room.game).toBeNull();
+                break;
+            }
+        }
     });
 });

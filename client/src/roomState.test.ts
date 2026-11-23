@@ -5,6 +5,7 @@ const room = {
     code: "ABCDE",
     mode: "compete" as const,
     players: [{ id: "p1", name: "ann", isGuest: true, isHost: true }],
+    game: null,
 };
 
 describe("roomReducer", () => {

@@ -1,6 +1,6 @@
 import websocket from "@fastify/websocket";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import { WebSocket } from "ws";
+import type { WebSocket } from "ws";
 import { SESSION_COOKIE, getUserByToken } from "../auth/sessions.js";
 import { isUsernameTaken } from "../auth/users.js";
 import type { Db } from "../db/types.js";
@@ -8,38 +8,45 @@ import {
     clientMessageSchema,
     createRoomSchema,
     type ErrorCode,
-    type RoomView,
     type ServerMessage,
 } from "../protocol.js";
 import type { RoomManager } from "./rooms.js";
+import { pickWords } from "./words.js";
 
 export interface GatewayOptions {
     db: Db;
     rooms: RoomManager;
-    /** Where is allowed to open a ws */
+    /** Origins that may open a WebSocket, besides the site's own address */
     allowedOrigins: string[];
-    /** Messages a connection can send per sec */
+    /** Messages a connection can send each second */
     messagesPerSecond: number;
-    /** Rooms one IP address can create per min */
+    /** Rooms one IP address can create each minute */
     createRoomLimit: number;
+    /** How often the server checks the game timers */
+    tickMs: number;
 }
 
 const ERROR_TEXT: Record<ErrorCode, string> = {
-    bad_message: "This message is not valid",
+    bad_message: "The message is not valid",
     room_not_found: "That room does not exist",
     room_full: "That room is full",
     name_taken: "That name is in use in this room",
     name_reserved:
-        "That name belongs to an account.. Pick another name or login",
+        "That name belongs to an account. Pick another name or log in",
     name_required: "Pick a name to join",
     already_joined: "You are already in a room",
+    not_in_room: "Join a room first",
+    not_host: "Only the host can start the game",
+    not_enough_players: "A game needs at least 2 players",
+    game_running: "A game is already running",
+    server_error: "The server had a problem. Try again",
     rate_limited: "You send messages too fast",
 };
 
 /**
- * A browser always sends an Origin header with a WS request
- * Accept only if it is the site's own address of a listed one
- * Stops other sites from using a visitor's cookie to open a connection
+ * A browser always sends an Origin header with a WebSocket request. Accept it only if
+ * it is the site's own address or a listed one. This stops other web sites from using
+ * a visitor's cookie to open a connection. A client with no Origin is not a browser.
  */
 export function originAllowed(
     origin: string | undefined,
@@ -59,7 +66,9 @@ export async function gateway(app: FastifyInstance, opts: GatewayOptions) {
     const { db, rooms } = opts;
     // room code -> player id -> socket
     const sockets = new Map<string, Map<string, WebSocket>>();
+
     await app.register(websocket, { options: { maxPayload: 4096 } });
+
     app.post(
         "/api/rooms",
         {
@@ -83,15 +92,27 @@ export async function gateway(app: FastifyInstance, opts: GatewayOptions) {
         },
     );
 
-    function broadcast(view: RoomView) {
-        const text = JSON.stringify({
-            type: "room_state",
-            room: view,
-        } satisfies ServerMessage);
-        for (const socket of sockets.get(view.code)?.values() ?? []) {
-            if (socket.readyState === socket.OPEN) socket.send(text);
+    /** Send each player their own view. Only the drawer gets the secret word */
+    function broadcast(code: string) {
+        for (const [playerId, socket] of sockets.get(code) ?? []) {
+            const room = rooms.view(code, playerId);
+            if (room && socket.readyState === socket.OPEN) {
+                socket.send(
+                    JSON.stringify({
+                        type: "room_state",
+                        room,
+                    } satisfies ServerMessage),
+                );
+            }
         }
     }
+
+    // Game timers. Rooms that changed get a new state
+    const ticker = setInterval(() => {
+        for (const code of rooms.tick()) broadcast(code);
+    }, opts.tickMs);
+    ticker.unref();
+    app.addHook("onClose", async () => clearInterval(ticker));
 
     const checkOrigin = async (
         request: FastifyRequest,
@@ -112,7 +133,7 @@ export async function gateway(app: FastifyInstance, opts: GatewayOptions) {
         "/ws",
         { websocket: true, preValidation: checkOrigin },
         (socket, request) => {
-            // Start the account lookup now. Handle messages one at a time
+            // Start the account lookup now. Handle messages one at a time, in order
             const userPromise = getUserByToken(
                 db,
                 request.cookies[SESSION_COOKIE],
@@ -136,8 +157,7 @@ export async function gateway(app: FastifyInstance, opts: GatewayOptions) {
                 const members = sockets.get(code);
                 members?.delete(playerId);
                 if (members?.size === 0) sockets.delete(code);
-                const view = rooms.leave(code, playerId);
-                if (view) broadcast(view);
+                if (rooms.leave(code, playerId)) broadcast(code);
             }
 
             async function handle(raw: string) {
@@ -156,6 +176,36 @@ export async function gateway(app: FastifyInstance, opts: GatewayOptions) {
                     return send({ type: "left" });
                 }
 
+                if (message.type === "start_game") {
+                    if (!joined) return fail("not_in_room");
+                    const { code, playerId } = joined;
+                    // Check first, so a player who cannot start does not cause a database query
+                    const problem = rooms.startError(code, playerId);
+                    if (problem)
+                        return fail(
+                            problem === "room_not_found"
+                                ? "not_in_room"
+                                : problem,
+                        );
+                    let words: string[];
+                    try {
+                        words = await pickWords(db, rooms.wordsNeeded);
+                    } catch (err) {
+                        request.log.error(err);
+                        return fail("server_error");
+                    }
+                    if (words.length === 0) return fail("server_error");
+                    const result = rooms.startGame(code, playerId, words);
+                    if (!result.ok)
+                        return fail(
+                            result.error === "room_not_found"
+                                ? "not_in_room"
+                                : result.error,
+                        );
+                    return broadcast(code);
+                }
+
+                // join_room
                 if (joined) return fail("already_joined");
                 const user = await userPromise;
                 let name: string;
@@ -167,7 +217,6 @@ export async function gateway(app: FastifyInstance, opts: GatewayOptions) {
                         return fail("name_reserved");
                     name = message.name;
                 }
-
                 const result = rooms.join(message.code, {
                     name,
                     userId: user?.id ?? null,
@@ -175,9 +224,9 @@ export async function gateway(app: FastifyInstance, opts: GatewayOptions) {
                 if (!result.ok) return fail(result.error);
 
                 if (socket.readyState !== socket.OPEN) {
-                    // Kicked out of inactive room
-                    const view = rooms.leave(message.code, result.player.id);
-                    if (view) broadcast(view);
+                    // The connection closed while we waited. Do not leave a ghost in the room
+                    if (rooms.leave(message.code, result.player.id))
+                        broadcast(message.code);
                     return;
                 }
                 joined = { code: message.code, playerId: result.player.id };
@@ -185,7 +234,7 @@ export async function gateway(app: FastifyInstance, opts: GatewayOptions) {
                 if (!members) sockets.set(message.code, (members = new Map()));
                 members.set(result.player.id, socket);
                 send({ type: "welcome", playerId: result.player.id });
-                broadcast(result.room);
+                broadcast(message.code);
             }
 
             socket.on("message", (data, isBinary) => {
