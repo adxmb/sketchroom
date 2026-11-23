@@ -5,8 +5,18 @@ import type { ServerMessage } from "../../server/src/protocol";
 const room = {
     code: "ABCDE",
     mode: "compete" as const,
-    players: [{ id: "p1", name: "ann", isGuest: true, isHost: true }],
+    players: [
+        {
+            id: "p1",
+            name: "ann",
+            isGuest: true,
+            isHost: true,
+            score: 0,
+            guessed: false,
+        },
+    ],
     game: null,
+    results: null,
 };
 
 it("keeps the room when an error comes after the join", () => {
@@ -229,6 +239,75 @@ describe("roomReducer", () => {
                 }),
             );
             expect(s.error).toBeNull();
+        });
+    });
+
+    describe("chat", () => {
+        const msg = (message: ServerMessage) =>
+            ({ type: "message", message }) as const;
+        const line = (text: string): ServerMessage => ({
+            type: "chat",
+            message: {
+                kind: "chat",
+                playerId: "p1",
+                name: "ann",
+                text,
+                knowsWord: false,
+            },
+        });
+
+        it("adds messages in order, with a different key for each", () => {
+            let s = roomReducer(initialRoomState, msg(line("one")));
+            s = roomReducer(s, msg(line("two")));
+            expect(s.chat.map((m) => m.text)).toEqual(["one", "two"]);
+            expect(new Set(s.chat.map((m) => m.key)).size).toBe(2);
+        });
+
+        it("keeps only the last 100 messages, and keys stay different", () => {
+            let s = initialRoomState;
+            for (let i = 0; i < 130; i++)
+                s = roomReducer(s, msg(line(`m${i}`)));
+            expect(s.chat).toHaveLength(100);
+            expect(s.chat[0]!.text).toBe("m30");
+            expect(new Set(s.chat.map((m) => m.key)).size).toBe(100);
+        });
+
+        it("keeps the chat when a new room state comes, and clears it when the player leaves", () => {
+            let s = roomReducer(initialRoomState, msg(line("one")));
+            s = roomReducer(s, msg({ type: "room_state", room }));
+            expect(s.chat).toHaveLength(1);
+            s = roomReducer(s, msg({ type: "left" }));
+            expect(s.chat).toEqual([]);
+        });
+
+        it("keeps guessed and close messages as they are", () => {
+            let s = roomReducer(
+                initialRoomState,
+                msg({
+                    type: "chat",
+                    message: {
+                        kind: "guessed",
+                        playerId: "p2",
+                        name: "bob",
+                        text: "",
+                        knowsWord: false,
+                    },
+                }),
+            );
+            s = roomReducer(
+                s,
+                msg({
+                    type: "chat",
+                    message: {
+                        kind: "close",
+                        playerId: "p2",
+                        name: "bob",
+                        text: "",
+                        knowsWord: false,
+                    },
+                }),
+            );
+            expect(s.chat.map((m) => m.kind)).toEqual(["guessed", "close"]);
         });
     });
 });

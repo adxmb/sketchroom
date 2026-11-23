@@ -7,6 +7,8 @@ import { PlayerList } from "../components/PlayerList";
 import { loadGuestName, saveGuestName } from "../guestName";
 import { useRoom } from "../useRoom";
 import type { Session } from "../useSession";
+import { ChatBox } from "../components/ChatBox";
+import { ResultsCard } from "../components/ResultsCard";
 
 export function RoomPage({ session }: { session: Session }) {
     const { code = "" } = useParams();
@@ -63,8 +65,16 @@ function Lobby({
     onChangeName: () => void;
 }) {
     const navigate = useNavigate();
-    const { state, leave, startGame, drawLocal, drawSend, undo, clearCanvas } =
-        useRoom(code, name);
+    const {
+        state,
+        leave,
+        startGame,
+        sendChat,
+        drawLocal,
+        drawSend,
+        undo,
+        clearCanvas,
+    } = useRoom(code, name);
     const [copied, setCopied] = useState(false);
 
     const copyLink = async () => {
@@ -162,9 +172,13 @@ function Lobby({
                         onUndo: undo,
                         onClear: clearCanvas,
                     }}
+                    chat={state.chat}
+                    onChat={sendChat}
                 />
             ) : (
                 <>
+                    {room.results && <ResultsCard results={room.results} />}
+
                     <section className="card">
                         <h2>
                             Players{" "}
@@ -188,8 +202,18 @@ function Lobby({
                                 ? "Waiting for the host to start the game."
                                 : room.players.length < 2
                                   ? "You need at least 2 players. Share the room code."
-                                  : "Everyone draws a word. The others guess it."}
+                                  : room.results
+                                    ? "Start again when you are ready."
+                                    : "Everyone draws a word. The others guess it."}
                         </p>
+                    </section>
+
+                    <section className="card">
+                        <ChatBox
+                            messages={state.chat}
+                            placeholder="Say something"
+                            onSend={sendChat}
+                        />
                     </section>
                 </>
             )}

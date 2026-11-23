@@ -56,6 +56,7 @@ export function useRoom(code: string, name: string | null) {
         state,
         leave: () => sendMessage({ type: "leave_room" }),
         startGame: () => sendMessage({ type: "start_game" }),
+        sendChat: (text: string) => sendMessage({ type: "chat", text }),
         drawLocal: (chunk: StrokeChunk) =>
             dispatch({ type: "local_chunk", chunk }),
         drawSend: (stroke: StrokeChunk) =>

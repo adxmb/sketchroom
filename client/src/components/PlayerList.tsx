@@ -20,8 +20,10 @@ export function PlayerList({
                     {p.id === drawerId && (
                         <span className="badge draw">Drawing</span>
                     )}
+                    {p.guessed && <span className="badge good">Found it</span>}
                     {p.isHost && <span className="badge host">Host</span>}
                     {p.isGuest && <span className="badge quiet">Guest</span>}
+                    {room.game && <span className="points">{p.score}</span>}
                 </li>
             ))}
         </ul>

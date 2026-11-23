@@ -6,6 +6,7 @@ import { AuthBox } from "../components/AuthBox";
 import { NameForm } from "../components/NameForm";
 import { loadGuestName, saveGuestName } from "../guestName";
 import type { Session } from "../useSession";
+import { Leaderboard } from "../components/Leaderboard";
 
 export function Home({ session }: { session: Session }) {
     const navigate = useNavigate();
@@ -89,6 +90,7 @@ export function Home({ session }: { session: Session }) {
             </section>
 
             <AuthBox session={session} />
+            <Leaderboard />
         </>
     );
 }

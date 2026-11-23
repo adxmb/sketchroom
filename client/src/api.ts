@@ -1,3 +1,5 @@
+import type { LeaderboardRow, Stats } from "../../server/src/protocol";
+
 export interface ApiUser {
     id: number;
     username: string;
@@ -46,4 +48,7 @@ export const api = {
     logout: () => request<void>("/api/auth/logout", { method: "POST" }),
     createRoom: (mode: "compete" | "collab") =>
         request<{ code: string }>("/api/rooms", post({ mode })),
+    stats: () => request<{ stats: Stats }>("/api/stats"),
+    leaderboard: () =>
+        request<{ players: LeaderboardRow[] }>("/api/leaderboard"),
 };

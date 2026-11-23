@@ -7,6 +7,8 @@ import type {
 import { secondsLeft, useCountdown } from "../countdown";
 import { DrawingBoard } from "./DrawingBoard";
 import { PlayerList } from "./PlayerList";
+import type { ChatEntry } from "../roomState";
+import { ChatBox } from "./ChatBox";
 
 export interface BoardActions {
     strokes: Stroke[];
@@ -21,16 +23,27 @@ export function GameScreen({
     game,
     myId,
     board,
+    chat,
+    onChat,
 }: {
     room: RoomView;
     game: GameView;
     myId: string | null;
     board: BoardActions;
+    chat: ChatEntry[];
+    onChat: (text: string) => void;
 }) {
     const ms = useCountdown(game.msLeft, room);
     const drawer = room.players.find((p) => p.id === game.drawerId);
     const iDraw = game.drawerId === myId;
     const reveal = game.phase === "reveal";
+    const me = room.players.find((p) => p.id === myId);
+    // The drawer and players who found the word chat with each other. The others guess
+    const placeholder = reveal
+        ? "Say something"
+        : iDraw || me?.guessed
+          ? "Chat with the players who know the word"
+          : "Type your guess";
 
     return (
         <>
@@ -74,6 +87,14 @@ export function GameScreen({
 
             <section className="card board">
                 <DrawingBoard {...board} canDraw={iDraw && !reveal} />
+            </section>
+
+            <section className="card">
+                <ChatBox
+                    messages={chat}
+                    placeholder={placeholder}
+                    onSend={onChat}
+                />
             </section>
 
             <section className="card">

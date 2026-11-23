@@ -1,5 +1,6 @@
 import { useState, type SubmitEvent } from "react";
 import type { Session } from "../useSession";
+import { MyStats } from "./Leaderboard";
 
 export function AuthBox({ session }: { session: Session }) {
     const [mode, setMode] = useState<"login" | "register">("login");
@@ -21,6 +22,7 @@ export function AuthBox({ session }: { session: Session }) {
                         Log out
                     </button>
                 </p>
+                <MyStats user={session.user} />
             </section>
         );
     }
