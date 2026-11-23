@@ -86,7 +86,7 @@ insert into words (text) values
   ('sunflower'),
   ('spider'),
   ('toaster'),
-  ('trumpet'),
+  ('trombone'),
   ('wizard'),
   ('bookshelf'),
   ('campfire'),
@@ -137,4 +137,4 @@ insert into words (text) values
   ('mountain'),
   ('rhino'),
   ('dolphin'),
-  ('space ship');
+  ('space ship') on conflict (text) do nothing;
