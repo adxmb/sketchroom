@@ -491,3 +491,122 @@ describe("games", () => {
         }
     });
 });
+
+describe("drawing", () => {
+    type CanvasMessage = Extract<ServerMessage, { type: "canvas" }>;
+    const dot = (id: number, extra = {}) => ({
+        id,
+        colour: 2,
+        size: 1,
+        points: [[100, 50]],
+        ...extra,
+    });
+
+    /** Ann (drawer), Bob and Cat are in a room with a game that has started */
+    async function startedGame() {
+        server = await start({ tickMs: 10 });
+        const code = await newRoom();
+        const ann = await joinAsGuest(code, "ann");
+        const bob = await joinAsGuest(code, "bob");
+        for (;;)
+            if ((await bob.nextOfType("room_state")).room.players.length === 2)
+                break;
+        ann.send({ type: "start_game" });
+        for (;;) if ((await bob.nextOfType("room_state")).room.game) break;
+        return { code, ann, bob };
+    }
+
+    it("sends the strokes of the drawer to the others, but not back to the drawer", async () => {
+        const { ann, bob } = await startedGame();
+        ann.send({
+            type: "draw",
+            stroke: dot(0, {
+                points: [
+                    [1, 2],
+                    [3, 4],
+                ],
+            }),
+        });
+        ann.send({
+            type: "draw",
+            stroke: dot(0, { points: [[5, 6]], done: true }),
+        });
+        const first = await bob.nextOfType("draw");
+        const second = await bob.nextOfType("draw");
+        expect(first.stroke).toMatchObject({
+            id: 0,
+            colour: 2,
+            points: [
+                [1, 2],
+                [3, 4],
+            ],
+        });
+        expect(second.stroke).toMatchObject({ id: 0, done: true });
+        // Ann gets no copy of her own strokes
+        ann.send({ type: "undo_stroke" });
+        await bob.nextOfType("canvas");
+        await expect(ann.nextOfType("draw")).rejects.toThrow(
+            "No message came in time",
+        );
+    });
+
+    it("does not let a guesser draw", async () => {
+        const { bob } = await startedGame();
+        bob.send({ type: "draw", stroke: dot(0) });
+        expect((await bob.nextOfType("error")).code).toBe("not_drawer");
+        bob.send({ type: "clear_canvas" });
+        expect((await bob.nextOfType("error")).code).toBe("not_drawer");
+    });
+
+    it("needs a room first", async () => {
+        server = await start();
+        const client = await connect();
+        client.send({ type: "draw", stroke: dot(0) });
+        expect((await client.nextOfType("error")).code).toBe("not_in_room");
+    });
+
+    it("rejects a point outside the board", async () => {
+        const { ann } = await startedGame();
+        ann.send({ type: "draw", stroke: dot(0, { points: [[9999, 0]] }) });
+        expect((await ann.nextOfType("error")).code).toBe("bad_message");
+    });
+
+    it("sends the whole drawing after undo and after clear", async () => {
+        const { ann, bob } = await startedGame();
+        ann.send({ type: "draw", stroke: dot(0, { done: true }) });
+        ann.send({ type: "draw", stroke: dot(1, { done: true }) });
+        await bob.nextOfType("draw");
+        await bob.nextOfType("draw");
+        ann.send({ type: "undo_stroke" });
+        const afterUndo = (await bob.nextOfType("canvas")) as CanvasMessage;
+        expect(afterUndo.strokes.map((s) => s.id)).toEqual([0]);
+        ann.send({ type: "clear_canvas" });
+        expect(
+            ((await bob.nextOfType("canvas")) as CanvasMessage).strokes,
+        ).toEqual([]);
+    });
+
+    it("gives the drawing so far to a player who joins in the middle of a turn", async () => {
+        const { code, ann } = await startedGame();
+        ann.send({
+            type: "draw",
+            stroke: dot(0, { points: [[7, 8]], done: true }),
+        });
+        // Wait until the server has the stroke
+        await new Promise((r) => setTimeout(r, 50));
+        const cat = await joinAsGuest(code, "cat");
+        const canvas = await cat.nextOfType("canvas");
+        expect(canvas.strokes).toMatchObject([
+            { id: 0, points: [[7, 8]], done: true },
+        ]);
+    });
+
+    it("does not send a canvas message to a player who joins an empty drawing", async () => {
+        const { code } = await startedGame();
+        const cat = await joinAsGuest(code, "cat");
+        await cat.nextOfType("room_state");
+        await expect(cat.nextOfType("canvas")).rejects.toThrow(
+            "No message came in time",
+        );
+    });
+});

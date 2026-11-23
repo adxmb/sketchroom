@@ -12,6 +12,7 @@ import {
 } from "../protocol.js";
 import type { RoomManager } from "./rooms.js";
 import { pickWords } from "./words.js";
+import { pl } from "zod/v4/locales";
 
 export interface GatewayOptions {
     db: Db;
@@ -39,6 +40,8 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
     not_host: "Only the host can start the game",
     not_enough_players: "A game needs at least 2 players",
     game_running: "A game is already running",
+    not_drawer: "You cannot draw now",
+    canvas_limit: "The drawing is too big",
     server_error: "The server had a problem. Try again",
     rate_limited: "You send messages too fast",
 };
@@ -104,6 +107,18 @@ export async function gateway(app: FastifyInstance, opts: GatewayOptions) {
                     } satisfies ServerMessage),
                 );
             }
+        }
+    }
+
+    function sendToOthers(
+        code: string,
+        expectId: string,
+        message: ServerMessage,
+    ) {
+        const text = JSON.stringify(message);
+        for (const [playerId, socket] of sockets.get(code) ?? []) {
+            if (playerId !== expectId && socket.readyState === socket.OPEN)
+                socket.send(text);
         }
     }
 
@@ -205,6 +220,36 @@ export async function gateway(app: FastifyInstance, opts: GatewayOptions) {
                     return broadcast(code);
                 }
 
+                if (
+                    message.type === "draw" ||
+                    message.type === "undo_stroke" ||
+                    message.type === "clear_canvas"
+                ) {
+                    if (!joined) return fail("not_in_room");
+                    const { code, playerId } = joined;
+                    if (message.type === "draw") {
+                        const result = rooms.draw(
+                            code,
+                            playerId,
+                            message.stroke,
+                        );
+                        if (!result.ok) return fail(result.error);
+                        return sendToOthers(code, playerId, {
+                            type: "draw",
+                            stroke: result.chunk,
+                        });
+                    }
+                    const allowed =
+                        message.type === "undo_stroke"
+                            ? rooms.undoStroke(code, playerId)
+                            : rooms.clearCanvas(code, playerId);
+                    if (!allowed) return fail("not_drawer");
+                    return sendToOthers(code, playerId, {
+                        type: "canvas",
+                        strokes: rooms.strokes(code),
+                    });
+                }
+
                 // join_room
                 if (joined) return fail("already_joined");
                 const user = await userPromise;
@@ -235,6 +280,8 @@ export async function gateway(app: FastifyInstance, opts: GatewayOptions) {
                 members.set(result.player.id, socket);
                 send({ type: "welcome", playerId: result.player.id });
                 broadcast(message.code);
+                const strokes = rooms.strokes(message.code);
+                if (strokes.length > 0) send({ type: "canvas", strokes });
             }
 
             socket.on("message", (data, isBinary) => {

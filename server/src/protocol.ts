@@ -27,6 +27,56 @@ export type Mode = z.infer<typeof modeSchema>;
 
 export const createRoomSchema = z.object({ mode: modeSchema });
 
+// ------- Drawing --------
+
+/** The size of the board */
+export const CANVAS_WIDTH = 800;
+export const CANVAS_HEIGHT = 600;
+/** Colours, by index */
+export const PALETTE = [
+    "#111827",
+    "#dc2626",
+    "#ea580c",
+    "#16a34a",
+    "#2563eb",
+    "#9333ea",
+    "#ffffff",
+] as const;
+/** Brush widths */
+export const BRUSH_SIZES = [4, 10, 22] as const;
+export const MAX_POINTS_PER_CHUNK = 50;
+export const pointSchema = z.tuple([
+    z.number().int().min(0).max(CANVAS_WIDTH),
+    z.number().int().min(0).max(CANVAS_HEIGHT),
+]);
+export type Point = z.infer<typeof pointSchema>;
+
+/** A stroke is a lone from pen down pos to pen up pos */
+export const strokeChunkSchema = z.object({
+    id: z.number().int().min(0).max(1_000_000),
+    colour: z
+        .number()
+        .int()
+        .min(0)
+        .max(PALETTE.length - 1),
+    size: z
+        .number()
+        .int()
+        .min(0)
+        .max(BRUSH_SIZES.length - 1),
+    points: z.array(pointSchema).min(1).max(MAX_POINTS_PER_CHUNK),
+    done: z.boolean().optional(),
+});
+export type StrokeChunk = z.infer<typeof strokeChunkSchema>;
+
+export interface Stroke {
+    id: number;
+    colour: number;
+    size: number;
+    points: Point[];
+    done: boolean;
+}
+
 // ------- Client to server --------
 export const clientMessageSchema = z.discriminatedUnion("type", [
     z.object({
@@ -36,6 +86,9 @@ export const clientMessageSchema = z.discriminatedUnion("type", [
     }),
     z.object({ type: z.literal("leave_room") }),
     z.object({ type: z.literal("start_game") }),
+    z.object({ type: z.literal("draw"), stroke: strokeChunkSchema }),
+    z.object({ type: z.literal("undo_stroke") }),
+    z.object({ type: z.literal("clear_canvas") }),
 ]);
 export type ClientMessage = z.infer<typeof clientMessageSchema>;
 
@@ -77,11 +130,15 @@ export type ErrorCode =
     | "not_host"
     | "not_enough_players"
     | "game_running"
+    | "not_drawer"
+    | "canvas_limit"
     | "server_error"
     | "rate_limited";
 
 export type ServerMessage =
     | { type: "welcome"; playerId: string }
     | { type: "room_state"; room: RoomView }
+    | { type: "draw"; stroke: StrokeChunk }
+    | { type: "canvas"; strokes: Stroke[] }
     | { type: "left" }
     | { type: "error"; code: ErrorCode; message: string };

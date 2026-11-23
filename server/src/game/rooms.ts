@@ -1,12 +1,15 @@
 import { randomInt, randomUUID } from "node:crypto";
 import {
-    GameView,
     MAX_PLAYERS,
     ROOM_CODE_ALPHABET,
+    type GameView,
     type Mode,
     type RoomView,
+    type Stroke,
+    type StrokeChunk,
 } from "../protocol.js";
 import { buildOrder, maskWord, nextTurn } from "./rules.js";
+import { applyChunk, undoLast } from "../canvas.js";
 
 export interface Player {
     id: string;
@@ -21,6 +24,8 @@ interface Game {
     turn: number;
     phase: "drawing" | "reveal";
     endsAt: number;
+    // Current drawing
+    strokes: Stroke[];
 }
 
 interface Room {
@@ -199,6 +204,7 @@ export class RoomManager {
             turn: 0,
             phase: "drawing",
             endsAt: this.now() + this.drawMs,
+            strokes: [],
         };
         return { ok: true };
     }
@@ -223,6 +229,7 @@ export class RoomManager {
                     room.game = null;
                 } else {
                     game.turn = next;
+                    game.strokes = [];
                     game.phase = "drawing";
                     game.endsAt = now + this.drawMs;
                 }
@@ -230,6 +237,50 @@ export class RoomManager {
             changed.push(room.code);
         }
         return changed;
+    }
+
+    private gameForDrawer(code: string, playerId: string): Game | null {
+        const game = this.rooms.get(code)?.game;
+        if (
+            !game ||
+            game.phase !== "drawing" ||
+            game.order[game.turn] !== playerId
+        )
+            return null;
+        return game;
+    }
+
+    draw(
+        code: string,
+        playerId: string,
+        chunk: StrokeChunk,
+    ):
+        | { ok: true; chunk: StrokeChunk }
+        | { ok: false; error: "not_drawer" | "canvas_limit" } {
+        const game = this.gameForDrawer(code, playerId);
+        if (!game) return { ok: false, error: "not_drawer" };
+        const result = applyChunk(game.strokes, chunk);
+        if (!result) return { ok: false, error: "canvas_limit" };
+        game.strokes = result.strokes;
+        return { ok: true, chunk: result.chunk };
+    }
+
+    undoStroke(code: string, playerId: string): boolean {
+        const game = this.gameForDrawer(code, playerId);
+        if (!game) return false;
+        game.strokes = undoLast(game.strokes);
+        return true;
+    }
+
+    clearCanvas(code: string, playerId: string): boolean {
+        const game = this.gameForDrawer(code, playerId);
+        if (!game) return false;
+        game.strokes = [];
+        return true;
+    }
+
+    strokes(code: string): Stroke[] {
+        return this.rooms.get(code)?.game?.strokes ?? [];
     }
 
     view(code: string, viewerId: string | null = null): RoomView | null {

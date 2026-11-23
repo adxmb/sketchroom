@@ -334,3 +334,111 @@ describe("games", () => {
         expect(manager.view(code)!.game).toBeNull();
     });
 });
+
+describe("drawing", () => {
+    const dot = (id: number, extra = {}) => ({
+        id,
+        colour: 1,
+        size: 1,
+        points: [[10, 10]] as [number, number][],
+        ...extra,
+    });
+
+    function drawSetup() {
+        const clock = { now: 1_000 };
+        const manager = new RoomManager({
+            now: () => clock.now,
+            makeCode: counterCodes(),
+            rounds: 1,
+        });
+        const created = manager.createRoom("compete");
+        if (!created.ok) throw new Error();
+        const ids = ["ann", "bob", "cat"].map((name) => {
+            const r = manager.join(created.code, { name, userId: null });
+            if (!r.ok) throw new Error();
+            return r.player.id;
+        });
+        manager.startGame(created.code, ids[0]!, ["apple", "robot", "tiger"]);
+        return { manager, code: created.code, ids, clock };
+    }
+
+    it("lets the drawer add strokes", () => {
+        const { manager, code, ids } = drawSetup();
+        const result = manager.draw(code, ids[0]!, dot(0, { done: true }));
+        expect(result.ok).toBe(true);
+        expect(manager.strokes(code)).toHaveLength(1);
+    });
+
+    it("does not let a guesser draw, clear or undo", () => {
+        const { manager, code, ids } = drawSetup();
+        expect(manager.draw(code, ids[1]!, dot(0))).toEqual({
+            ok: false,
+            error: "not_drawer",
+        });
+        manager.draw(code, ids[0]!, dot(0, { done: true }));
+        expect(manager.undoStroke(code, ids[1]!)).toBe(false);
+        expect(manager.clearCanvas(code, ids[1]!)).toBe(false);
+        expect(manager.strokes(code)).toHaveLength(1);
+    });
+
+    it("does not let a player draw in the lobby", () => {
+        const manager = new RoomManager();
+        const created = manager.createRoom("compete");
+        if (!created.ok) throw new Error();
+        const a = manager.join(created.code, { name: "ann", userId: null });
+        if (!a.ok) throw new Error();
+        expect(manager.draw(created.code, a.player.id, dot(0))).toEqual({
+            ok: false,
+            error: "not_drawer",
+        });
+        expect(manager.strokes(created.code)).toEqual([]);
+    });
+
+    it("undoes the last stroke and clears all strokes", () => {
+        const { manager, code, ids } = drawSetup();
+        manager.draw(code, ids[0]!, dot(0, { done: true }));
+        manager.draw(code, ids[0]!, dot(1, { done: true }));
+        expect(manager.undoStroke(code, ids[0]!)).toBe(true);
+        expect(manager.strokes(code).map((s) => s.id)).toEqual([0]);
+        expect(manager.clearCanvas(code, ids[0]!)).toBe(true);
+        expect(manager.strokes(code)).toEqual([]);
+    });
+
+    it("keeps the drawing in the reveal but does not allow new strokes", () => {
+        const { manager, code, ids, clock } = drawSetup();
+        manager.draw(code, ids[0]!, dot(0, { done: true }));
+        clock.now += 60_000;
+        manager.tick();
+        expect(manager.view(code)!.game!.phase).toBe("reveal");
+        expect(manager.strokes(code)).toHaveLength(1);
+        expect(manager.draw(code, ids[0]!, dot(1))).toEqual({
+            ok: false,
+            error: "not_drawer",
+        });
+        expect(manager.clearCanvas(code, ids[0]!)).toBe(false);
+    });
+
+    it("starts each turn with an empty drawing", () => {
+        const { manager, code, ids, clock } = drawSetup();
+        manager.draw(code, ids[0]!, dot(0, { done: true }));
+        clock.now += 60_000;
+        manager.tick();
+        clock.now += 5_000;
+        manager.tick();
+        expect(manager.view(code)!.game!.turn).toBe(2);
+        expect(manager.strokes(code)).toEqual([]);
+        // The new drawer starts again at id 0
+        expect(manager.draw(code, ids[1]!, dot(0)).ok).toBe(true);
+    });
+
+    it("reports when the drawing is too big", () => {
+        const { manager, code, ids } = drawSetup();
+        let result: ReturnType<typeof manager.draw> = {
+            ok: true,
+            chunk: dot(0),
+        };
+        for (let id = 0; id < 301 && result.ok; id++)
+            result = manager.draw(code, ids[0]!, dot(id, { done: true }));
+        expect(result).toEqual({ ok: false, error: "canvas_limit" });
+    });
+});
