@@ -1,15 +1,18 @@
 import { buildApp } from "./app.js";
+import { loadConfig } from "./config.js";
 import { migrate } from "./db/migrate.js";
 import { createPgDb } from "./db/pg.js";
 import { RoomManager } from "./game/rooms.js";
 
-const databaseUrl = process.env.DATABASE_URL;
-if (!databaseUrl) {
-    console.error("DATABASE_URL is not set");
+let config;
+try {
+    config = loadConfig(process.env);
+} catch (err) {
+    console.error((err as Error).message);
     process.exit(1);
 }
 
-const db = createPgDb(databaseUrl);
+const db = createPgDb(config.databaseUrl);
 const applied = await migrate(db);
 if (applied.length) console.log(`applied migrations: ${applied.join(", ")}`);
 
@@ -20,8 +23,11 @@ sweeper.unref();
 const app = await buildApp({
     db,
     rooms,
-    secureCookies: process.env.NODE_ENV === "production",
-    trustProxy: process.env.TRUST_PROXY === "1",
+    allowedOrigins: config.allowedOrigins,
+    secureCookies: config.secureCookies,
+    trustProxy: config.trustProxy,
+    staticDir: config.staticDir,
+    debugIp: config.debugIp,
     logger: true,
 });
 
@@ -33,4 +39,4 @@ const shutdown = async () => {
 process.on("SIGTERM", shutdown);
 process.on("SIGINT", shutdown);
 
-await app.listen({ port: Number(process.env.PORT ?? 3000), host: "0.0.0.0" });
+await app.listen({ port: config.port, host: config.host });
