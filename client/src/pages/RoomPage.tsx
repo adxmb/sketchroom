@@ -154,6 +154,12 @@ function Lobby({
                 </div>
             </header>
 
+            {state.status === "reconnecting" && (
+                <p className="notice" role="status">
+                    The connection was lost. Trying to connect again...
+                </p>
+            )}
+
             {state.error && (
                 <p className="error" role="alert">
                     {state.error}

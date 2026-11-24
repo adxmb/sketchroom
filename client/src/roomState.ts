@@ -7,7 +7,12 @@ import type {
     StrokeChunk,
 } from "../../server/src/protocol";
 
-export type RoomStatus = "connecting" | "joined" | "error" | "closed";
+export type RoomStatus =
+    | "connecting"
+    | "joined"
+    | "reconnecting"
+    | "error"
+    | "closed";
 
 /** A chat message with a key for the list on the screen */
 export type ChatEntry = ChatMessage & { key: number };
@@ -34,7 +39,8 @@ export type RoomEvent =
     // The drawer changes the drawing here at once. The server does not send it back
     | { type: "local_chunk"; chunk: StrokeChunk }
     | { type: "local_undo" }
-    | { type: "local_clear" };
+    | { type: "local_clear" }
+    | { type: "reconnecting" };
 
 export const initialRoomState: RoomState = {
     status: "connecting",
@@ -55,6 +61,10 @@ export function roomReducer(state: RoomState, event: RoomEvent): RoomState {
             // An error message stays on screen. It explains why the connection closed
             return state.status === "error"
                 ? state
+                : { ...state, status: "closed" };
+        case "reconnecting":
+            return state.room
+                ? { ...state, status: "reconnecting" }
                 : { ...state, status: "closed" };
         case "local_chunk":
             return {
@@ -115,6 +125,9 @@ export function roomReducer(state: RoomState, event: RoomEvent): RoomState {
                 case "error":
                     // The drawer can send a stroke just after the turn ended. This is not a problem
                     if (m.code === "not_drawer") return state;
+                    // A join that fails while the page tries again (the room is gone, the name is taken) ends the page
+                    if (state.status === "reconnecting")
+                        return { ...state, status: "error", error: m.message };
                     // Before the join, an error ends the page. After the join, it is only a notice
                     return state.room
                         ? { ...state, error: m.message }

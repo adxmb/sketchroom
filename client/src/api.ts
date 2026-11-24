@@ -46,6 +46,7 @@ export const api = {
             post({ username, password }),
         ),
     logout: () => request<void>("/api/auth/logout", { method: "POST" }),
+    guest: () => request<void>("/api/guest", { method: "POST" }),
     createRoom: (mode: "compete" | "collab") =>
         request<{ code: string }>("/api/rooms", post({ mode })),
     stats: () => request<{ stats: Stats }>("/api/stats"),

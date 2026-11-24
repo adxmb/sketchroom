@@ -13,6 +13,7 @@ const room = {
             isHost: true,
             score: 0,
             guessed: false,
+            connected: true,
         },
     ],
     game: null,
@@ -308,6 +309,77 @@ describe("roomReducer", () => {
                 }),
             );
             expect(s.chat.map((m) => m.kind)).toEqual(["guessed", "close"]);
+        });
+    });
+
+    describe("reconnecting", () => {
+        const msg = (message: ServerMessage) =>
+            ({ type: "message", message }) as const;
+        const joined = () => {
+            let s = roomReducer(
+                initialRoomState,
+                msg({ type: "welcome", playerId: "p1" }),
+            );
+            s = roomReducer(s, msg({ type: "room_state", room }));
+            s = roomReducer(
+                s,
+                msg({
+                    type: "chat",
+                    message: {
+                        kind: "chat",
+                        playerId: "p1",
+                        name: "ann",
+                        text: "hi",
+                        knowsWord: false,
+                    },
+                }),
+            );
+            return s;
+        };
+
+        it("keeps the room, the chat and the player while the page tries again", () => {
+            const s = roomReducer(joined(), { type: "reconnecting" });
+            expect(s.status).toBe("reconnecting");
+            expect(s.room).toEqual(room);
+            expect(s.chat).toHaveLength(1);
+            expect(s.playerId).toBe("p1");
+        });
+
+        it("is joined again when the server sends the room", () => {
+            let s = roomReducer(joined(), { type: "reconnecting" });
+            s = roomReducer(s, msg({ type: "room_state", room }));
+            expect(s.status).toBe("joined");
+            expect(s.error).toBeNull();
+        });
+
+        it("ends the page when the new join fails", () => {
+            let s = roomReducer(joined(), { type: "reconnecting" });
+            s = roomReducer(
+                s,
+                msg({
+                    type: "error",
+                    code: "room_not_found",
+                    message: "That room does not exist",
+                }),
+            );
+            expect(s).toMatchObject({
+                status: "error",
+                error: "That room does not exist",
+            });
+        });
+
+        it("closes the page if there is no room to keep", () => {
+            expect(
+                roomReducer(initialRoomState, { type: "reconnecting" }).status,
+            ).toBe("closed");
+        });
+
+        it("closes the page when all tries fail", () => {
+            const s = roomReducer(
+                roomReducer(joined(), { type: "reconnecting" }),
+                { type: "socket_closed" },
+            );
+            expect(s.status).toBe("closed");
         });
     });
 });

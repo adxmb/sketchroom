@@ -4,6 +4,7 @@ import {
     type ClientMessage,
     type StrokeChunk,
 } from "../../server/src/protocol";
+import { api } from "./api";
 import { initialRoomState, roomReducer } from "./roomState";
 
 function socketUrl() {
@@ -11,45 +12,87 @@ function socketUrl() {
     return `${scheme}://${window.location.host}/ws`;
 }
 
-/** Open a WebSocket to a room */
+/** Wait this long before each new try. The server keeps the seat for 30 seconds, so five tries fit */
+export const RETRY_DELAYS_MS = [500, 1000, 2000, 4000, 8000];
+
+const NO_RETRY_CODES = [1008, 4000];
+
 export function useRoom(code: string, name: string | null) {
     const [state, dispatch] = useReducer(roomReducer, initialRoomState);
     const socketRef = useRef<WebSocket | null>(null);
 
     useEffect(() => {
+        let stopped = false;
+        let joined = false;
+        let attempt = 0;
+        let timer: ReturnType<typeof setTimeout> | undefined;
         dispatch({ type: "connecting" });
-        const socket = new WebSocket(socketUrl());
-        socketRef.current = socket;
 
-        socket.onopen = () => {
-            const join: ClientMessage = {
-                type: "join_room",
-                code,
-                ...(name ? { name } : {}),
+        const open = () => {
+            const socket = new WebSocket(socketUrl());
+            socketRef.current = socket;
+
+            socket.onopen = () => {
+                const join: ClientMessage = {
+                    type: "join_room",
+                    code,
+                    ...(name ? { name } : {}),
+                };
+                socket.send(JSON.stringify(join));
             };
-            socket.send(JSON.stringify(join));
+            socket.onmessage = (event) => {
+                try {
+                    const message = JSON.parse(String(event.data));
+                    if (message.type === "welcome") {
+                        joined = true;
+                        attempt = 0;
+                    }
+                    if (message.type === "left") stopped = true;
+                    dispatch({ type: "message", message });
+                } catch {
+                    // Ignore not JSON
+                }
+            };
+            socket.onclose = (event) => {
+                if (stopped) return;
+                const delay = RETRY_DELAYS_MS[attempt];
+                if (
+                    !joined ||
+                    NO_RETRY_CODES.includes(event.code) ||
+                    delay === undefined
+                ) {
+                    dispatch({ type: "socket_closed" });
+                    return;
+                }
+                attempt++;
+                dispatch({ type: "reconnecting" });
+                timer = setTimeout(open, delay);
+            };
         };
-        socket.onmessage = (event) => {
-            try {
-                dispatch({
-                    type: "message",
-                    message: JSON.parse(String(event.data)),
-                });
-            } catch {
-                // Ignore non-JSON
-            }
-        };
-        socket.onclose = () => dispatch({ type: "socket_closed" });
+
+        api.guest().finally(() => {
+            if (!stopped) open();
+        });
 
         return () => {
-            socket.onclose = null;
-            socket.close();
+            stopped = true;
+            clearTimeout(timer);
+            const socket = socketRef.current;
+            if (socket) {
+                socket.onclose = null;
+                socket.close();
+            }
         };
     }, [code, name]);
 
     const sendMessage = (message: ClientMessage) => {
-        if (clientMessageSchema.safeParse(message).success)
-            socketRef.current?.send(JSON.stringify(message));
+        const socket = socketRef.current;
+        if (
+            socket?.readyState === WebSocket.OPEN &&
+            clientMessageSchema.safeParse(message).success
+        ) {
+            socket.send(JSON.stringify(message));
+        }
     };
 
     return {

@@ -403,3 +403,12 @@ a:focus-visible {
 .results .points {
     margin-left: auto;
 }
+
+.notice {
+    background: var(--chip);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 10px 12px;
+    margin: 0 0 12px;
+    color: var(--fg);
+}
