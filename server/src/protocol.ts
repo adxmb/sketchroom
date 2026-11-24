@@ -113,6 +113,7 @@ export interface PlayerView {
     isHost: boolean;
     score: number;
     guessed: boolean;
+    connected: boolean;
 }
 
 export interface ChatMessage {

@@ -25,6 +25,8 @@ async function start(
         allowedOrigins?: string[];
         game?: RoomManagerOptions;
         tickMs?: number;
+        maxConnectionsPerIp?: number;
+        heartbeatMs?: number;
     } = {},
 ) {
     const db = await createTestDb();
@@ -40,6 +42,8 @@ async function start(
         messagesPerSecond: opts.messagesPerSecond,
         allowedOrigins: opts.allowedOrigins,
         tickMs: opts.tickMs,
+        maxConnectionsPerIp: opts.maxConnectionsPerIp,
+        heartbeatMs: opts.heartbeatMs,
     });
     await app.listen({ port: 0, host: "127.0.0.1" });
     const port = (app.server.address() as AddressInfo).port;
@@ -811,4 +815,233 @@ describe("chat, guesses and saved scores", () => {
             (await server.db.query("select 1 from games")).rows,
         ).toHaveLength(1);
     }, 20_000);
+});
+
+describe("reconnect and limits", () => {
+    type RoomMessage = Extract<ServerMessage, { type: "room_state" }>;
+
+    const cookieA = `gid=${"a".repeat(32)}`;
+    const cookieB = `gid=${"b".repeat(32)}`;
+
+    async function until(
+        client: Client,
+        test: (m: RoomMessage) => boolean,
+    ): Promise<RoomMessage> {
+        for (;;) {
+            const m = await client.nextOfType("room_state");
+            if (test(m)) return m;
+        }
+    }
+
+    /** Wait until the test is true. The server needs a short time to see a closed connection */
+    async function eventually(test: () => boolean) {
+        for (let i = 0; i < 100 && !test(); i++)
+            await new Promise((r) => setTimeout(r, 20));
+        expect(test()).toBe(true);
+    }
+
+    const playersOf = (code: string) => server!.rooms.view(code)!.players;
+
+    it("gives a guest cookie one time", async () => {
+        server = await start();
+        const first = await server.app.inject({
+            method: "POST",
+            url: "/api/guest",
+        });
+        expect(first.statusCode).toBe(204);
+        const cookie = first.cookies.find((c) => c.name === "gid")!;
+        expect(cookie.value).toMatch(/^[0-9a-f]{32}$/);
+        expect(cookie.httpOnly).toBe(true);
+        expect(cookie.sameSite).toBe("Lax");
+
+        const again = await server.app.inject({
+            method: "POST",
+            url: "/api/guest",
+            cookies: { gid: cookie.value },
+        });
+        expect(again.statusCode).toBe(204);
+        expect(again.cookies.find((c) => c.name === "gid")).toBeUndefined();
+
+        const bad = await server.app.inject({
+            method: "POST",
+            url: "/api/guest",
+            cookies: { gid: "not-an-id" },
+        });
+        expect(bad.cookies.find((c) => c.name === "gid")!.value).toMatch(
+            /^[0-9a-f]{32}$/,
+        );
+    });
+
+    it("gives a guest the same seat after a reload", async () => {
+        server = await start();
+        const code = await newRoom();
+        const first = await joinAsGuest(code, "ann", { cookie: cookieA });
+        const welcome = await first.nextOfType("welcome");
+        await first.nextOfType("room_state");
+
+        first.ws.terminate();
+        await eventually(() => playersOf(code)[0]?.connected === false);
+        expect(playersOf(code)).toHaveLength(1);
+
+        const second = await joinAsGuest(code, "ann", { cookie: cookieA });
+        expect((await second.nextOfType("welcome")).playerId).toBe(
+            welcome.playerId,
+        );
+        const state = await second.nextOfType("room_state");
+        expect(state.room.players).toHaveLength(1);
+        expect(state.room.players[0]).toMatchObject({
+            name: "ann",
+            connected: true,
+            isHost: true,
+        });
+    });
+
+    it("does not give the seat to another browser that uses the same name", async () => {
+        server = await start();
+        const code = await newRoom();
+        const first = await joinAsGuest(code, "ann", { cookie: cookieA });
+        await first.nextOfType("room_state");
+        first.ws.terminate();
+        await eventually(() => playersOf(code)[0]?.connected === false);
+
+        const other = await joinAsGuest(code, "ann", { cookie: cookieB });
+        expect((await other.nextOfType("error")).code).toBe("name_taken");
+        const none = await joinAsGuest(code, "ann");
+        expect((await none.nextOfType("error")).code).toBe("name_taken");
+    });
+
+    it("lets two guests of one browser play with different names", async () => {
+        server = await start();
+        const code = await newRoom();
+        const a = await joinAsGuest(code, "ann", { cookie: cookieA });
+        const idA = (await a.nextOfType("welcome")).playerId;
+        const b = await joinAsGuest(code, "bob", { cookie: cookieA });
+        const idB = (await b.nextOfType("welcome")).playerId;
+        expect(idA).not.toBe(idB);
+        await until(b, (m) => m.room.players.length === 2);
+        expect(playersOf(code).map((p) => p.connected)).toEqual([true, true]);
+    });
+
+    it("frees the name at once when a guest has no cookie", async () => {
+        server = await start();
+        const code = await newRoom();
+        const first = await joinAsGuest(code, "ann");
+        await first.nextOfType("room_state");
+        first.ws.terminate();
+        await eventually(() => playersOf(code).length === 0);
+        const second = await joinAsGuest(code, "ann");
+        expect((await second.nextOfType("welcome")).playerId).toBeTruthy();
+    });
+
+    it("shows the others when a player is away and when the player is back", async () => {
+        server = await start();
+        const code = await newRoom();
+        const ann = await joinAsGuest(code, "ann", { cookie: cookieA });
+        const bob = await joinAsGuest(code, "bob", { cookie: cookieB });
+        await until(bob, (m) => m.room.players.length === 2);
+
+        ann.ws.terminate();
+        const away = await until(bob, (m) =>
+            m.room.players.some((p) => p.name === "ann" && !p.connected),
+        );
+        expect(away.room.players).toHaveLength(2);
+
+        const back = await joinAsGuest(code, "ann", { cookie: cookieA });
+        await back.nextOfType("welcome");
+        await until(bob, (m) => m.room.players.every((p) => p.connected));
+    });
+
+    it("removes a player who does not come back in time", async () => {
+        server = await start({ tickMs: 10, game: { reconnectMs: 150 } });
+        const code = await newRoom();
+        const ann = await joinAsGuest(code, "ann", { cookie: cookieA });
+        const bob = await joinAsGuest(code, "bob", { cookie: cookieB });
+        await until(bob, (m) => m.room.players.length === 2);
+        ann.ws.terminate();
+        const gone = await until(bob, (m) => m.room.players.length === 1);
+        expect(gone.room.players[0]).toMatchObject({
+            name: "bob",
+            isHost: true,
+        });
+    });
+
+    it("lets an account take its seat with a new connection, and closes the old one", async () => {
+        server = await start();
+        const reg = await server.app.inject({
+            method: "POST",
+            url: "/api/auth/register",
+            payload: { username: "Amy_1", password: "correct horse" },
+        });
+        const cookie = `sid=${reg.cookies.find((c) => c.name === "sid")!.value}`;
+        const code = await newRoom();
+        const first = await joinAsGuest(code, "ignored", { cookie });
+        const welcome = await first.nextOfType("welcome");
+        await first.nextOfType("room_state");
+
+        const second = await joinAsGuest(code, "ignored", { cookie });
+        expect((await second.nextOfType("welcome")).playerId).toBe(
+            welcome.playerId,
+        );
+        expect(await first.closed).toBe(4000);
+        // The old connection is closed now. The player must still be in the room, and connected
+        await new Promise((r) => setTimeout(r, 100));
+        expect(playersOf(code)).toHaveLength(1);
+        expect(playersOf(code)[0]).toMatchObject({
+            name: "Amy_1",
+            connected: true,
+        });
+    });
+
+    it("keeps the game running for a player who comes back", async () => {
+        server = await start({ tickMs: 10 });
+        const code = await newRoom();
+        const ann = await joinAsGuest(code, "ann", { cookie: cookieA });
+        const bob = await joinAsGuest(code, "bob", { cookie: cookieB });
+        await until(bob, (m) => m.room.players.length === 2);
+        ann.send({ type: "start_game" });
+        await until(bob, (m) => !!m.room.game);
+
+        bob.ws.terminate();
+        await eventually(() =>
+            playersOf(code).some((p) => p.name === "bob" && !p.connected),
+        );
+        const back = await joinAsGuest(code, "bob", { cookie: cookieB });
+        const state = await until(back, (m) => !!m.room.game);
+        expect(state.room.game!.turn).toBe(1);
+        expect(state.room.players.every((p) => p.connected)).toBe(true);
+    });
+
+    it("limits the connections of one IP address", async () => {
+        server = await start({ maxConnectionsPerIp: 2 });
+        await connect();
+        const second = await connect();
+        await expect(connect()).rejects.toThrow("HTTP 429");
+        // A closed connection gives its place back
+        second.ws.close();
+        await second.closed;
+        await new Promise((r) => setTimeout(r, 50));
+        await connect();
+    });
+
+    it("closes a connection that fails too many joins", async () => {
+        server = await start();
+        const client = await connect();
+        for (let i = 0; i < 10; i++)
+            client.send({ type: "join_room", code: "ZZZZZ", name: "ann" });
+        expect(await client.closed).toBe(1008);
+    });
+
+    it("closes a connection that does not answer pings, and keeps one that does", async () => {
+        server = await start({ heartbeatMs: 50 });
+        const good = await connect();
+        const dead = new WebSocket(`ws://127.0.0.1:${server.port}/ws`, {
+            autoPong: false,
+        });
+        open.push(dead);
+        const deadClosed = new Promise<void>((resolve) =>
+            dead.on("close", () => resolve()),
+        );
+        await deadClosed;
+        expect(good.ws.readyState).toBe(good.ws.OPEN);
+    });
 });

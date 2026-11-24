@@ -27,6 +27,9 @@ export interface Player {
     name: string;
     /** account id is null for guests */
     userId: number | null;
+    owner: string | null;
+    connected: boolean;
+    disconnectedAt: number | null;
 }
 
 interface Game {
@@ -79,7 +82,7 @@ export type StartError =
     | "not_enough_players";
 export type JoinError = "room_not_found" | "room_full" | "name_taken";
 export type JoinResult =
-    | { ok: true; player: Player; room: RoomView }
+    | { ok: true; player: Player; room: RoomView; resumed: boolean }
     | { ok: false; error: JoinError };
 
 export interface RoomManagerOptions {
@@ -93,6 +96,7 @@ export interface RoomManagerOptions {
     minPlayers?: number;
     drawMs?: number;
     revealMs?: number;
+    reconnectMs?: number;
     now?: () => number;
     makeCode?: () => string;
 }
@@ -118,6 +122,7 @@ export class RoomManager {
     private minPlayers: number;
     private drawMs: number;
     private revealMs: number;
+    private reconnectMs: number;
     private now: () => number;
     private makeCode: () => string;
 
@@ -130,6 +135,7 @@ export class RoomManager {
         this.minPlayers = opts.minPlayers ?? 2;
         this.drawMs = opts.drawMs ?? 60_000;
         this.revealMs = opts.revealMs ?? 5_000;
+        this.reconnectMs = opts.reconnectMs ?? 30_000;
         this.now = opts.now ?? Date.now;
         this.makeCode = opts.makeCode ?? randomCode;
     }
@@ -168,27 +174,57 @@ export class RoomManager {
 
     join(
         code: string,
-        who: { name: string; userId: number | null },
+        who: { name: string; userId: number | null; owner?: string | null },
     ): JoinResult {
         const room = this.rooms.get(code);
         if (!room) return { ok: false, error: "room_not_found" };
-        if (room.players.size >= this.maxPlayers)
-            return { ok: false, error: "room_full" };
-        const taken = [...room.players.values()].some(
+        const owner = who.owner ?? null;
+        const same = [...room.players.values()].find(
             (p) => p.name.toLowerCase() === who.name.toLowerCase(),
         );
-        if (taken) return { ok: false, error: "name_taken" };
+        if (same) {
+            if (owner === null || same.owner !== owner)
+                return { ok: false, error: "name_taken" };
+            same.connected = true;
+            same.disconnectedAt = null;
+            room.emptySince = null;
+            return {
+                ok: true,
+                player: same,
+                room: this.toView(room),
+                resumed: true,
+            };
+        }
+        if (room.players.size >= this.maxPlayers)
+            return { ok: false, error: "room_full" };
 
         const player: Player = {
             id: randomUUID(),
             name: who.name,
             userId: who.userId,
+            owner,
+            connected: true,
+            disconnectedAt: null,
         };
         room.players.set(player.id, player);
         room.hostId ??= player.id;
         room.everJoined = true;
         room.emptySince = null;
-        return { ok: true, player, room: this.toView(room) };
+        return { ok: true, player, room: this.toView(room), resumed: false };
+    }
+
+    disconnect(code: string, playerId: string): RoomView | null {
+        const room = this.rooms.get(code);
+        const player = room?.players.get(playerId);
+        if (!room || !player) return room ? this.toView(room) : null;
+        if (player.owner === null) return this.leave(code, playerId);
+        player.connected = false;
+        player.disconnectedAt = this.now();
+        const game = room.game;
+        // The guessers who are still here may all have the word already
+        if (game && game.phase === "drawing" && this.allGuessed(room, game))
+            this.endTurn(room, game, true);
+        return this.toView(room);
     }
 
     /** Remove a player */
@@ -249,8 +285,19 @@ export class RoomManager {
     /** Move game forwards when a timer ends */
     tick(): string[] {
         const now = this.now();
-        const changed: string[] = [];
+        const changed = new Set<string>();
         for (const room of this.rooms.values()) {
+            // A player who did not come back in time leaves now
+            for (const p of [...room.players.values()]) {
+                if (
+                    !p.connected &&
+                    p.disconnectedAt !== null &&
+                    now - p.disconnectedAt >= this.reconnectMs
+                ) {
+                    this.leave(room.code, p.id);
+                    changed.add(room.code);
+                }
+            }
             const game = room.game;
             if (!game || now < game.endsAt) continue;
             if (game.phase === "drawing") {
@@ -271,9 +318,9 @@ export class RoomManager {
                     game.endsAt = now + this.drawMs;
                 }
             }
-            changed.push(room.code);
+            changed.add(room.code);
         }
-        return changed;
+        return [...changed];
     }
 
     /** Games that ended since the last call. The caller saves them */
@@ -364,10 +411,10 @@ export class RoomManager {
     private allGuessed(room: Room, game: Game): boolean {
         const drawerId = game.order[game.turn];
         let guessers = 0;
-        for (const id of room.players.keys()) {
-            if (id === drawerId) continue;
+        for (const p of room.players.values()) {
+            if (p.id === drawerId || !p.connected) continue;
             guessers++;
-            if (!game.guessed.has(id)) return false;
+            if (!game.guessed.has(p.id)) return false;
         }
         return guessers > 0;
     }
@@ -530,6 +577,7 @@ export class RoomManager {
                 isHost: p.id === room.hostId,
                 score: room.game?.scores.get(p.id) ?? 0,
                 guessed: room.game?.guessed.has(p.id) ?? false,
+                connected: p.connected,
             })),
             game: room.game ? this.gameView(room.game, viewerId) : null,
             results: room.lastResults,

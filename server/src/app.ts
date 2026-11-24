@@ -6,6 +6,7 @@ import type { Db } from "./db/types.js";
 import { gateway } from "./game/gateway.js";
 import { RoomManager } from "./game/rooms.js";
 import { statsRoutes } from "./stats.js";
+import { guestRoutes } from "./guest.js";
 
 export interface AppOptions {
     db: Db;
@@ -20,6 +21,8 @@ export interface AppOptions {
     messagesPerSecond?: number;
     createRoomLimit?: number;
     tickMs?: number;
+    maxConnectionsPerIp?: number;
+    heartbeatMs?: number;
     logger?: boolean;
 }
 
@@ -37,6 +40,9 @@ export async function buildApp(opts: AppOptions) {
         authRateLimit: opts.authRateLimit ?? 10,
     });
     await app.register(statsRoutes, { db: opts.db });
+    await app.register(guestRoutes, {
+        secureCookies: opts.secureCookies ?? false,
+    });
     await app.register(gateway, {
         db: opts.db,
         rooms: opts.rooms ?? new RoomManager(),
@@ -44,6 +50,8 @@ export async function buildApp(opts: AppOptions) {
         messagesPerSecond: opts.messagesPerSecond ?? 30,
         createRoomLimit: opts.createRoomLimit ?? 20,
         tickMs: opts.tickMs ?? 500,
+        maxConnectionsPerIp: opts.maxConnectionsPerIp ?? 20,
+        heartbeatMs: opts.heartbeatMs ?? 20_000,
     });
     app.get("/health", async () => ({ status: "ok" }));
     return app;

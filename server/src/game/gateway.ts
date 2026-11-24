@@ -13,7 +13,7 @@ import {
 import type { RoomManager } from "./rooms.js";
 import { pickWords } from "./words.js";
 import { saveGame } from "../stats.js";
-import { pl } from "zod/v4/locales";
+import { GUEST_COOKIE, isGuestId } from "../guest.js";
 
 export interface GatewayOptions {
     db: Db;
@@ -26,6 +26,10 @@ export interface GatewayOptions {
     createRoomLimit: number;
     /** How often the server checks the game timers */
     tickMs: number;
+    /** WebSocket connections that one IP address can have at the same time */
+    maxConnectionsPerIp: number;
+    /** The server pings each connection this often. A connection that does not answer is closed. 0 means no pings */
+    heartbeatMs: number;
 }
 
 const ERROR_TEXT: Record<ErrorCode, string> = {
@@ -49,6 +53,12 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
 
 const CHAT_BURST = 5;
 const CHAT_WINDOW_MS = 5000;
+
+/** A connection can fail this many joins. Then it is closed. This stops a script that guesses room codes */
+const MAX_JOIN_FAILURES = 10;
+
+/** Close code for a connection that another connection of the same player replaced */
+const CLOSE_REPLACED = 4000;
 
 /**
  * A browser always sends an Origin header with a WebSocket request. Accept it only if
@@ -140,7 +150,7 @@ export async function gateway(app: FastifyInstance, opts: GatewayOptions) {
         }
     }
 
-    // Game timers. Rooms that changed get a new state
+    // Game timers. Rooms that changed get a new state. Games that ended are saved
     const ticker = setInterval(() => {
         for (const code of rooms.tick()) broadcast(code);
         for (const game of rooms.takeFinished()) {
@@ -149,6 +159,9 @@ export async function gateway(app: FastifyInstance, opts: GatewayOptions) {
     }, opts.tickMs);
     ticker.unref();
     app.addHook("onClose", async () => clearInterval(ticker));
+
+    // IP address -> number of open connections
+    const connectionsByIp = new Map<string, number>();
 
     const checkOrigin = async (
         request: FastifyRequest,
@@ -163,6 +176,11 @@ export async function gateway(app: FastifyInstance, opts: GatewayOptions) {
         ) {
             return reply.code(403).send({ error: "Origin not allowed" });
         }
+        if (
+            (connectionsByIp.get(request.ip) ?? 0) >= opts.maxConnectionsPerIp
+        ) {
+            return reply.code(429).send({ error: "Too many connections" });
+        }
     };
 
     app.get(
@@ -174,6 +192,10 @@ export async function gateway(app: FastifyInstance, opts: GatewayOptions) {
                 db,
                 request.cookies[SESSION_COOKIE],
             ).catch(() => null);
+            const guestId = request.cookies[GUEST_COOKIE];
+            const ip = request.ip;
+            connectionsByIp.set(ip, (connectionsByIp.get(ip) ?? 0) + 1);
+            let joinFailures = 0;
             let joined: { code: string; playerId: string } | null = null;
             let chain: Promise<void> = Promise.resolve();
             let windowStart = Date.now();
@@ -187,14 +209,18 @@ export async function gateway(app: FastifyInstance, opts: GatewayOptions) {
             const fail = (code: ErrorCode) =>
                 send({ type: "error", code, message: ERROR_TEXT[code] });
 
-            function leave() {
+            function leave(keepSeat: boolean) {
                 if (!joined) return;
                 const { code, playerId } = joined;
                 joined = null;
                 const members = sockets.get(code);
-                members?.delete(playerId);
-                if (members?.size === 0) sockets.delete(code);
-                if (rooms.leave(code, playerId)) broadcast(code);
+                if (members?.get(playerId) !== socket) return;
+                members.delete(playerId);
+                if (members.size === 0) sockets.delete(code);
+                const view = keepSeat
+                    ? rooms.disconnect(code, playerId)
+                    : rooms.leave(code, playerId);
+                if (view) broadcast(code);
             }
 
             async function handle(raw: string) {
@@ -209,7 +235,7 @@ export async function gateway(app: FastifyInstance, opts: GatewayOptions) {
                 const message = parsed.data;
 
                 if (message.type === "leave_room") {
-                    leave();
+                    leave(false);
                     return send({ type: "left" });
                 }
 
@@ -304,32 +330,56 @@ export async function gateway(app: FastifyInstance, opts: GatewayOptions) {
 
                 // join_room
                 if (joined) return fail("already_joined");
+                const failJoin = (code: ErrorCode) => {
+                    fail(code);
+                    if (++joinFailures >= MAX_JOIN_FAILURES)
+                        socket.close(1008, "Too many failed joins");
+                };
                 const user = await userPromise;
                 let name: string;
                 if (user) {
                     name = user.username;
                 } else {
-                    if (!message.name) return fail("name_required");
+                    if (!message.name) return failJoin("name_required");
                     if (await isUsernameTaken(db, message.name))
-                        return fail("name_reserved");
+                        return failJoin("name_reserved");
                     name = message.name;
                 }
+                // An account is the same player in every browser. A guest is the same player in one browser
+                const owner = user
+                    ? `u:${user.id}`
+                    : isGuestId(guestId)
+                      ? `g:${guestId}`
+                      : null;
                 const result = rooms.join(message.code, {
                     name,
                     userId: user?.id ?? null,
+                    owner,
                 });
-                if (!result.ok) return fail(result.error);
+                if (!result.ok) return failJoin(result.error);
 
                 if (socket.readyState !== socket.OPEN) {
                     // The connection closed while we waited. Do not leave a ghost in the room
-                    if (rooms.leave(message.code, result.player.id))
+                    if (
+                        !result.resumed &&
+                        rooms.leave(message.code, result.player.id)
+                    )
+                        broadcast(message.code);
+                    else if (
+                        result.resumed &&
+                        rooms.disconnect(message.code, result.player.id)
+                    )
                         broadcast(message.code);
                     return;
                 }
                 joined = { code: message.code, playerId: result.player.id };
                 let members = sockets.get(message.code);
                 if (!members) sockets.set(message.code, (members = new Map()));
+                // The same player can have an old connection that the server did not see close yet. The new one replaces it
+                const old = members.get(result.player.id);
                 members.set(result.player.id, socket);
+                if (old && old !== socket)
+                    old.close(CLOSE_REPLACED, "Replaced by a new connection");
                 send({ type: "welcome", playerId: result.player.id });
                 broadcast(message.code);
                 const strokes = rooms.strokes(message.code);
@@ -353,8 +403,27 @@ export async function gateway(app: FastifyInstance, opts: GatewayOptions) {
                     .catch((err) => request.log.error(err));
             });
 
+            // Ping the client. A connection that is dead without a close message (a lost network) is found and closed
+            let alive = true;
+            socket.on("pong", () => {
+                alive = true;
+            });
+            const heartbeat =
+                opts.heartbeatMs > 0
+                    ? setInterval(() => {
+                          if (!alive) return socket.terminate();
+                          alive = false;
+                          socket.ping();
+                      }, opts.heartbeatMs)
+                    : null;
+            heartbeat?.unref();
+
             socket.on("close", () => {
-                chain = chain.then(leave);
+                if (heartbeat) clearInterval(heartbeat);
+                const count = (connectionsByIp.get(ip) ?? 1) - 1;
+                if (count <= 0) connectionsByIp.delete(ip);
+                else connectionsByIp.set(ip, count);
+                chain = chain.then(() => leave(true));
             });
             socket.on("error", () => socket.terminate());
         },

@@ -723,3 +723,184 @@ describe("guessing and scores", () => {
         expect(manager.view(code)!.results).toBeNull();
     });
 });
+
+describe("reconnecting", () => {
+    const WORDS = ["apple", "robot", "tiger"];
+
+    /** Ann, Bob and Cat have an owner each, so they can come back */
+    function reconSetup(names = ["ann", "bob", "cat"], owned = true) {
+        const clock = { now: 1_000 };
+        const manager = new RoomManager({
+            now: () => clock.now,
+            makeCode: counterCodes(),
+            drawMs: 60_000,
+            revealMs: 5_000,
+            reconnectMs: 30_000,
+            rounds: 1,
+        });
+        const created = manager.createRoom("compete");
+        if (!created.ok) throw new Error();
+        const ids = names.map((name) => {
+            const r = manager.join(created.code, {
+                name,
+                userId: null,
+                owner: owned ? `g:${name}` : null,
+            });
+            if (!r.ok) throw new Error();
+            return r.player.id;
+        });
+        return { manager, code: created.code, ids, clock };
+    }
+
+    const connectedOf = (m: RoomManager, code: string) =>
+        Object.fromEntries(
+            m.view(code)!.players.map((p) => [p.name, p.connected]),
+        );
+
+    it("keeps the seat of a player who has an owner", () => {
+        const { manager, code, ids } = reconSetup();
+        manager.disconnect(code, ids[1]!);
+        expect(connectedOf(manager, code)).toEqual({
+            ann: true,
+            bob: false,
+            cat: true,
+        });
+    });
+
+    it("removes a player without an owner at once", () => {
+        const { manager, code, ids } = reconSetup(["ann", "bob"], false);
+        manager.disconnect(code, ids[1]!);
+        expect(manager.view(code)!.players.map((p) => p.name)).toEqual(["ann"]);
+    });
+
+    it("gives the same seat to the same owner and name", () => {
+        const { manager, code, ids } = reconSetup();
+        manager.disconnect(code, ids[1]!);
+        const back = manager.join(code, {
+            name: "BOB",
+            userId: null,
+            owner: "g:bob",
+        });
+        expect(back).toMatchObject({ ok: true, resumed: true });
+        if (!back.ok) return;
+        expect(back.player.id).toBe(ids[1]);
+        expect(manager.view(code)!.players).toHaveLength(3);
+        expect(connectedOf(manager, code).bob).toBe(true);
+    });
+
+    it("takes the seat from an old connection that is not closed yet", () => {
+        const { manager, code, ids } = reconSetup();
+        const back = manager.join(code, {
+            name: "bob",
+            userId: null,
+            owner: "g:bob",
+        });
+        expect(back).toMatchObject({ ok: true, resumed: true });
+        expect(back.ok && back.player.id).toBe(ids[1]);
+        expect(manager.view(code)!.players).toHaveLength(3);
+    });
+
+    it("does not give the seat to another owner, or to a player without an owner", () => {
+        const { manager, code, ids } = reconSetup();
+        manager.disconnect(code, ids[1]!);
+        expect(
+            manager.join(code, { name: "bob", userId: null, owner: "g:other" }),
+        ).toEqual({
+            ok: false,
+            error: "name_taken",
+        });
+        expect(
+            manager.join(code, { name: "bob", userId: null, owner: null }),
+        ).toEqual({
+            ok: false,
+            error: "name_taken",
+        });
+    });
+
+    it("removes the player when the time to come back is over", () => {
+        const { manager, code, ids, clock } = reconSetup();
+        manager.disconnect(code, ids[1]!);
+        clock.now += 29_000;
+        expect(manager.tick()).toEqual([]);
+        expect(manager.view(code)!.players).toHaveLength(3);
+        clock.now += 1_000;
+        expect(manager.tick()).toEqual([code]);
+        expect(manager.view(code)!.players.map((p) => p.name)).toEqual([
+            "ann",
+            "cat",
+        ]);
+    });
+
+    it("keeps the host while the host is away, and moves the host after the time ends", () => {
+        const { manager, code, ids, clock } = reconSetup();
+        manager.disconnect(code, ids[0]!);
+        expect(manager.view(code)!.players.find((p) => p.isHost)!.name).toBe(
+            "ann",
+        );
+        clock.now += 30_000;
+        manager.tick();
+        expect(manager.view(code)!.players.find((p) => p.isHost)!.name).toBe(
+            "bob",
+        );
+    });
+
+    it("keeps the score of a player who comes back", () => {
+        const { manager, code, ids } = reconSetup();
+        manager.startGame(code, ids[0]!, WORDS);
+        manager.chat(code, ids[1]!, "apple");
+        manager.disconnect(code, ids[1]!);
+        manager.join(code, { name: "bob", userId: null, owner: "g:bob" });
+        const bob = manager.view(code)!.players.find((p) => p.name === "bob")!;
+        expect(bob).toMatchObject({ guessed: true, connected: true });
+        expect(bob.score).toBe(500);
+    });
+
+    it("does not wait for a guesser who is away", () => {
+        const { manager, code, ids } = reconSetup();
+        manager.startGame(code, ids[0]!, WORDS);
+        manager.disconnect(code, ids[2]!);
+        expect(manager.view(code)!.game!.phase).toBe("drawing");
+        manager.chat(code, ids[1]!, "apple");
+        expect(manager.view(code)!.game!.phase).toBe("reveal");
+    });
+
+    it("ends the turn at once when the last guesser who is not done goes away", () => {
+        const { manager, code, ids } = reconSetup();
+        manager.startGame(code, ids[0]!, WORDS);
+        manager.chat(code, ids[1]!, "apple");
+        manager.disconnect(code, ids[2]!);
+        expect(manager.view(code)!.game!.phase).toBe("reveal");
+    });
+
+    it("ends the turn without points when the drawer does not come back", () => {
+        const { manager, code, ids, clock } = reconSetup();
+        manager.startGame(code, ids[0]!, WORDS);
+        manager.chat(code, ids[1]!, "apple");
+        manager.disconnect(code, ids[0]!);
+        expect(manager.view(code)!.game!.phase).toBe("drawing");
+        clock.now += 30_000;
+        manager.tick();
+        const view = manager.view(code)!;
+        expect(view.game!.phase).toBe("reveal");
+        expect(view.players.map((p) => p.name)).toEqual(["bob", "cat"]);
+    });
+
+    it("stops the game when too few players are left after the time ends", () => {
+        const { manager, code, ids, clock } = reconSetup(["ann", "bob"]);
+        manager.startGame(code, ids[0]!, WORDS);
+        manager.disconnect(code, ids[1]!);
+        clock.now += 30_000;
+        manager.tick();
+        expect(manager.view(code)!.game).toBeNull();
+        expect(manager.takeFinished()).toEqual([]);
+    });
+
+    it("keeps a room that only has players who are away, until they are removed", () => {
+        const { manager, code, ids, clock } = reconSetup(["ann"]);
+        manager.disconnect(code, ids[0]!);
+        expect(manager.sweep()).toBe(0);
+        clock.now += 30_000;
+        manager.tick();
+        expect(manager.view(code)!.players).toEqual([]);
+    });
+});
