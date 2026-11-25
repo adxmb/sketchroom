@@ -36,7 +36,6 @@ export function Home({ session }: { session: Session }) {
         <>
             <header>
                 <h1>SketchRoom</h1>
-                <p className="lead">Draw a word. The others guess!</p>
             </header>
             <section className="card">
                 <h2>Start a room</h2>

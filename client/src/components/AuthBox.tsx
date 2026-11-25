@@ -41,9 +41,6 @@ export function AuthBox({ session }: { session: Session }) {
     return (
         <section className="card">
             <h2>{mode === "login" ? "Log in" : "Create an account"}</h2>
-            <p className="muted">
-                An account keeps your scores. You can also play as a guest.
-            </p>
             <form onSubmit={submit} className="stack">
                 <label>
                     Username
@@ -91,6 +88,10 @@ export function AuthBox({ session }: { session: Session }) {
                     </button>
                 </div>
             </form>
+            <p className="muted">
+                An account let you keep your scores. Alternatively, you can play
+                a guest.
+            </p>
         </section>
     );
 }
