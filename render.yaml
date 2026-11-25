@@ -1,0 +1,15 @@
+services:
+    - type: web
+      name: sketchroom
+      runtime: docker
+      plan: free
+      region: singapore
+      dockerfilePath: ./Dockerfile
+      dockerContext: ./
+      healthCheckPath: /health
+      autoDeployTrigger: commit
+      envVars:
+          - key: NODE_ENV
+            value: production
+          - key: DATABASE_URL
+            sync: false

@@ -39,3 +39,10 @@ jobs:
               working-directory: client
             - run: npm run build
               working-directory: client
+
+    # Builds the production image, so a broken Dockerfile shows up in a pull request and not on deploy day
+    docker:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+            - run: docker build -t sketchroom .
