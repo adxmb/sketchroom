@@ -14,6 +14,7 @@ const room = {
             score: 0,
             guessed: false,
             connected: true,
+            colour: 0,
         },
     ],
     game: null,

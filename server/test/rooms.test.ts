@@ -904,3 +904,186 @@ describe("reconnecting", () => {
         expect(manager.view(code)!.players).toEqual([]);
     });
 });
+
+describe("shared board (collab)", () => {
+    const dot = (id: number, extra = {}) => ({
+        id,
+        colour: 1,
+        size: 1,
+        points: [[10, 10]] as [number, number][],
+        ...extra,
+    });
+
+    function collabSetup(names = ["ann", "bob", "cat"]) {
+        const manager = new RoomManager({ makeCode: counterCodes() });
+        const created = manager.createRoom("collab");
+        if (!created.ok) throw new Error();
+        const ids = names.map((name) => {
+            const r = manager.join(created.code, { name, userId: null });
+            if (!r.ok) throw new Error();
+            return r.player.id;
+        });
+        return { manager, code: created.code, ids };
+    }
+
+    it("gives each player a different colour, and the lowest free one to a new player", () => {
+        const { manager, code, ids } = collabSetup(["ann", "bob", "cat"]);
+        expect(manager.view(code)!.players.map((p) => p.colour)).toEqual([
+            0, 1, 2,
+        ]);
+        manager.leave(code, ids[1]!);
+        const dan = manager.join(code, { name: "dan", userId: null });
+        expect(dan.ok && dan.player.colour).toBe(1);
+    });
+
+    it("keeps the colour of a player who comes back", () => {
+        const manager = new RoomManager({ makeCode: counterCodes() });
+        const created = manager.createRoom("collab");
+        if (!created.ok) throw new Error();
+        const a = manager.join(created.code, {
+            name: "ann",
+            userId: null,
+            owner: "g:1",
+        });
+        const b = manager.join(created.code, {
+            name: "bob",
+            userId: null,
+            owner: "g:2",
+        });
+        if (!a.ok || !b.ok) throw new Error();
+        manager.disconnect(created.code, a.player.id);
+        const again = manager.join(created.code, {
+            name: "ann",
+            userId: null,
+            owner: "g:1",
+        });
+        expect(again.ok && again.player.colour).toBe(0);
+    });
+
+    it("uses every colour in a room of 8", () => {
+        const { manager, code } = collabSetup([
+            "p1",
+            "p2",
+            "p3",
+            "p4",
+            "p5",
+            "p6",
+            "p7",
+            "p8",
+        ]);
+        expect(
+            new Set(manager.view(code)!.players.map((p) => p.colour)).size,
+        ).toBe(8);
+    });
+
+    it("lets every player draw at the same time, in the lobby, with no game", () => {
+        const { manager, code, ids } = collabSetup();
+        expect(manager.boardDraw(code, ids[0]!, dot(0))).toMatchObject({
+            ok: true,
+        });
+        expect(manager.boardDraw(code, ids[1]!, dot(0))).toMatchObject({
+            ok: true,
+        });
+        expect(
+            manager.boardDraw(
+                code,
+                ids[0]!,
+                dot(0, { points: [[20, 20]], done: true }),
+            ),
+        ).toMatchObject({ ok: true });
+        expect(manager.board(code)).toHaveLength(2);
+        expect(
+            manager.board(code).find((s) => s.owner === ids[0])!.points,
+        ).toHaveLength(2);
+    });
+
+    it("undoes only the own last stroke", () => {
+        const { manager, code, ids } = collabSetup();
+        manager.boardDraw(code, ids[0]!, dot(0, { done: true }));
+        manager.boardDraw(code, ids[1]!, dot(0, { done: true }));
+        manager.boardDraw(code, ids[0]!, dot(1, { done: true }));
+        expect(manager.boardUndo(code, ids[0]!)).toBe(true);
+        expect(manager.board(code).map((s) => [s.owner, s.id])).toEqual([
+            [ids[0], 0],
+            [ids[1], 0],
+        ]);
+        // Cat has no strokes. Undo does nothing, and the other strokes stay
+        expect(manager.boardUndo(code, ids[2]!)).toBe(true);
+        expect(manager.board(code)).toHaveLength(2);
+    });
+
+    it("clears only the own strokes", () => {
+        const { manager, code, ids } = collabSetup();
+        manager.boardDraw(code, ids[0]!, dot(0, { done: true }));
+        manager.boardDraw(code, ids[1]!, dot(0, { done: true }));
+        manager.boardDraw(code, ids[0]!, dot(1, { done: true }));
+        expect(manager.boardClear(code, ids[0]!)).toBe(true);
+        expect(manager.board(code).map((s) => s.owner)).toEqual([ids[1]]);
+    });
+
+    it("keeps the board for the life of the room, also when the players leave and come back", () => {
+        const { manager, code, ids } = collabSetup(["ann", "bob"]);
+        manager.boardDraw(code, ids[0]!, dot(0, { done: true }));
+        manager.leave(code, ids[0]!);
+        manager.leave(code, ids[1]!);
+        expect(manager.board(code)).toHaveLength(1);
+        const cat = manager.join(code, { name: "cat", userId: null });
+        expect(cat.ok).toBe(true);
+        expect(manager.board(code)).toHaveLength(1);
+    });
+
+    it("removes the board with the room", () => {
+        let now = 0;
+        const manager = new RoomManager({
+            now: () => now,
+            emptyTtlMs: 1000,
+            makeCode: counterCodes(),
+        });
+        const created = manager.createRoom("collab");
+        if (!created.ok) throw new Error();
+        const a = manager.join(created.code, { name: "ann", userId: null });
+        if (!a.ok) throw new Error();
+        manager.boardDraw(created.code, a.player.id, dot(0, { done: true }));
+        manager.leave(created.code, a.player.id);
+        now += 2000;
+        manager.sweep();
+        expect(manager.board(created.code)).toEqual([]);
+        expect(manager.view(created.code)).toBeNull();
+    });
+
+    it("does not let a stranger draw, and does not draw in a compete room", () => {
+        const { manager, code } = collabSetup();
+        expect(manager.boardDraw(code, "nobody", dot(0))).toEqual({
+            ok: false,
+            error: "not_in_room",
+        });
+        expect(manager.boardUndo(code, "nobody")).toBe(false);
+        expect(manager.boardClear(code, "nobody")).toBe(false);
+
+        const created = manager.createRoom("compete");
+        if (!created.ok) throw new Error();
+        const a = manager.join(created.code, { name: "ann", userId: null });
+        if (!a.ok) throw new Error();
+        expect(manager.boardDraw(created.code, a.player.id, dot(0))).toEqual({
+            ok: false,
+            error: "wrong_mode",
+        });
+        expect(manager.boardUndo(created.code, a.player.id)).toBe(false);
+        expect(manager.hasSharedBoard(created.code)).toBe(false);
+        expect(manager.hasSharedBoard(code)).toBe(true);
+    });
+
+    it("does not start a game in a collab room or in a teams room", () => {
+        const { manager, code, ids } = collabSetup(["ann", "bob"]);
+        expect(manager.startGame(code, ids[0]!, ["apple", "robot"])).toEqual({
+            ok: false,
+            error: "wrong_mode",
+        });
+        expect(manager.view(code)!.game).toBeNull();
+        const teams = manager.createRoom("teams");
+        if (!teams.ok) throw new Error();
+        const a = manager.join(teams.code, { name: "ann", userId: null });
+        if (!a.ok) throw new Error();
+        expect(manager.startError(teams.code, a.player.id)).toBe("wrong_mode");
+    });
+});

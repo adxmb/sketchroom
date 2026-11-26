@@ -32,7 +32,7 @@ export const chatTextSchema = z
         "Text has characted that are not allowed",
     );
 
-export const modeSchema = z.enum(["compete", "collab"]);
+export const modeSchema = z.enum(["compete", "teams", "collab"]);
 export type Mode = z.infer<typeof modeSchema>;
 
 export const createRoomSchema = z.object({ mode: modeSchema });
@@ -87,6 +87,21 @@ export interface Stroke {
     done: boolean;
 }
 
+export interface OwnedStroke extends Stroke {
+    owner: string;
+}
+
+export const PLAYER_COLOURS = [
+    "#e11d48",
+    "#2563eb",
+    "#16a34a",
+    "#d97706",
+    "#7c3aed",
+    "#0891b2",
+    "#db2777",
+    "#4d7c0f",
+] as const;
+
 // ------- Client to server --------
 
 export const clientMessageSchema = z.discriminatedUnion("type", [
@@ -100,6 +115,11 @@ export const clientMessageSchema = z.discriminatedUnion("type", [
     z.object({ type: z.literal("draw"), stroke: strokeChunkSchema }),
     z.object({ type: z.literal("undo_stroke") }),
     z.object({ type: z.literal("clear_canvas") }),
+    z.object({
+        type: z.literal("cursor"),
+        x: z.number().int().min(0).max(CANVAS_WIDTH),
+        y: z.number().int().min(0).max(CANVAS_HEIGHT),
+    }),
     z.object({ type: z.literal("chat"), text: chatTextSchema }),
 ]);
 export type ClientMessage = z.infer<typeof clientMessageSchema>;
@@ -114,6 +134,7 @@ export interface PlayerView {
     score: number;
     guessed: boolean;
     connected: boolean;
+    colour: number;
 }
 
 export interface ChatMessage {
@@ -160,6 +181,7 @@ export type ErrorCode =
     | "not_enough_players"
     | "game_running"
     | "not_drawer"
+    | "wrong_mode"
     | "canvas_limit"
     | "server_error"
     | "rate_limited";
@@ -169,6 +191,9 @@ export type ServerMessage =
     | { type: "room_state"; room: RoomView }
     | { type: "draw"; stroke: StrokeChunk }
     | { type: "canvas"; strokes: Stroke[] }
+    | { type: "board_draw"; owner: string; stroke: StrokeChunk }
+    | { type: "board"; strokes: OwnedStroke[] }
+    | { type: "cursor"; playerId: string; x: number; y: number }
     | { type: "left" }
     | { type: "chat"; message: ChatMessage }
     | { type: "error"; code: ErrorCode; message: string };

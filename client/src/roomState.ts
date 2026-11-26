@@ -105,6 +105,11 @@ export function roomReducer(state: RoomState, event: RoomEvent): RoomState {
                     };
                 case "canvas":
                     return { ...state, strokes: m.strokes };
+                // The shared board messages. The client uses them from day 9
+                case "board_draw":
+                case "board":
+                case "cursor":
+                    return state;
                 case "chat":
                     return {
                         ...state,

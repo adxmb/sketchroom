@@ -112,7 +112,7 @@ async function connect(headers: Record<string, string> = {}): Promise<Client> {
 }
 
 async function newRoom(
-    mode: "compete" | "collab" = "compete",
+    mode: "compete" | "teams" | "collab" = "compete",
 ): Promise<string> {
     const res = await server!.app.inject({
         method: "POST",
@@ -612,6 +612,181 @@ describe("drawing", () => {
         await expect(cat.nextOfType("canvas")).rejects.toThrow(
             "No message came in time",
         );
+    });
+});
+
+describe("shared board (collab)", () => {
+    type BoardMessage = Extract<ServerMessage, { type: "board" }>;
+    const dot = (id: number, extra = {}) => ({
+        id,
+        colour: 2,
+        size: 1,
+        points: [[100, 50]],
+        ...extra,
+    });
+
+    /** Ann and Bob are in a collab room. Ann has seen both players */
+    async function twoInRoom() {
+        server = await start();
+        const code = await newRoom("collab");
+        const ann = await joinAsGuest(code, "ann");
+        const bob = await joinAsGuest(code, "bob");
+        for (;;)
+            if ((await ann.nextOfType("room_state")).room.players.length === 2)
+                break;
+        return { code, ann, bob };
+    }
+
+    it("gives each player a different colour in the room state", async () => {
+        const { code } = await twoInRoom();
+        const cat = await joinAsGuest(code, "cat");
+        const state = await cat.nextOfType("room_state");
+        expect(state.room.players.map((p) => p.colour)).toEqual([0, 1, 2]);
+    });
+
+    it("sends the strokes of each player to the others, with the owner", async () => {
+        const { ann, bob } = await twoInRoom();
+        const welcomeBob = await bob.nextOfType("welcome");
+        ann.send({
+            type: "draw",
+            stroke: dot(0, {
+                points: [
+                    [1, 2],
+                    [3, 4],
+                ],
+            }),
+        });
+        const m = await bob.nextOfType("board_draw");
+        expect(m.stroke).toMatchObject({
+            id: 0,
+            colour: 2,
+            points: [
+                [1, 2],
+                [3, 4],
+            ],
+        });
+        expect(m.owner).not.toBe(welcomeBob.playerId);
+        // Ann does not get her own stroke back
+        await expect(ann.nextOfType("board_draw")).rejects.toThrow(
+            "No message came in time",
+        );
+    });
+
+    it("lets both players draw, and each one has the same stroke id", async () => {
+        const { ann, bob } = await twoInRoom();
+        ann.send({ type: "draw", stroke: dot(0, { done: true }) });
+        bob.send({ type: "draw", stroke: dot(0, { done: true }) });
+        await ann.nextOfType("board_draw");
+        await bob.nextOfType("board_draw");
+        ann.send({ type: "undo_stroke" });
+        const after = (await bob.nextOfType("board")) as BoardMessage;
+        // Only the stroke of Ann is gone
+        expect(after.strokes).toHaveLength(1);
+    });
+
+    it("sends the whole board to everyone, also the sender, after undo and clear", async () => {
+        const { ann, bob } = await twoInRoom();
+        ann.send({ type: "draw", stroke: dot(0, { done: true }) });
+        ann.send({ type: "draw", stroke: dot(1, { done: true }) });
+        bob.send({ type: "draw", stroke: dot(0, { done: true }) });
+        await ann.nextOfType("board_draw");
+        await bob.nextOfType("board_draw");
+        await bob.nextOfType("board_draw");
+        ann.send({ type: "undo_stroke" });
+        const a1 = (await ann.nextOfType("board")) as BoardMessage;
+        const b1 = (await bob.nextOfType("board")) as BoardMessage;
+        expect(a1.strokes).toHaveLength(2);
+        expect(b1.strokes).toEqual(a1.strokes);
+        ann.send({ type: "clear_canvas" });
+        const b2 = (await bob.nextOfType("board")) as BoardMessage;
+        expect(b2.strokes).toHaveLength(1);
+        expect(
+            ((await ann.nextOfType("board")) as BoardMessage).strokes,
+        ).toHaveLength(1);
+    });
+
+    it("gives the whole board to a player who joins later", async () => {
+        const { code, ann, bob } = await twoInRoom();
+        ann.send({
+            type: "draw",
+            stroke: dot(0, { points: [[7, 8]], done: true }),
+        });
+        await bob.nextOfType("board_draw");
+        const cat = await joinAsGuest(code, "cat");
+        const board = (await cat.nextOfType("board")) as BoardMessage;
+        expect(board.strokes).toMatchObject([
+            { id: 0, points: [[7, 8]], done: true },
+        ]);
+    });
+
+    it("does not send a board message to a player who joins an empty board", async () => {
+        const { code } = await twoInRoom();
+        const cat = await joinAsGuest(code, "cat");
+        await cat.nextOfType("room_state");
+        await expect(cat.nextOfType("board")).rejects.toThrow(
+            "No message came in time",
+        );
+    });
+
+    it("sends the cursor to the others, with the id of the player", async () => {
+        const { ann, bob } = await twoInRoom();
+        // Ann is the first player in the list
+        const annId = (await bob.nextOfType("room_state")).room.players[0]!.id;
+        ann.send({ type: "cursor", x: 300, y: 200 });
+        expect(await bob.nextOfType("cursor")).toEqual({
+            type: "cursor",
+            playerId: annId,
+            x: 300,
+            y: 200,
+        });
+        await expect(ann.nextOfType("cursor")).rejects.toThrow(
+            "No message came in time",
+        );
+    });
+
+    it("drops cursor messages that come too fast", async () => {
+        const { ann, bob } = await twoInRoom();
+        for (let i = 1; i <= 5; i++) ann.send({ type: "cursor", x: i, y: i });
+        const first = await bob.nextOfType("cursor");
+        expect(first.x).toBe(1);
+        await expect(bob.nextOfType("cursor")).rejects.toThrow(
+            "No message came in time",
+        );
+    });
+
+    it("does not send cursors in a compete room", async () => {
+        server = await start();
+        const code = await newRoom("compete");
+        const ann = await joinAsGuest(code, "ann");
+        const bob = await joinAsGuest(code, "bob");
+        for (;;)
+            if ((await ann.nextOfType("room_state")).room.players.length === 2)
+                break;
+        ann.send({ type: "cursor", x: 1, y: 1 });
+        await expect(bob.nextOfType("cursor")).rejects.toThrow(
+            "No message came in time",
+        );
+    });
+
+    it("needs a room first, and checks the cursor point", async () => {
+        server = await start();
+        const client = await connect();
+        client.send({ type: "cursor", x: 1, y: 1 });
+        expect((await client.nextOfType("error")).code).toBe("not_in_room");
+        client.send({ type: "cursor", x: 9999, y: 1 } as never);
+        expect((await client.nextOfType("error")).code).toBe("bad_message");
+    });
+
+    it("does not start a game in a collab room", async () => {
+        const { ann } = await twoInRoom();
+        ann.send({ type: "start_game" });
+        expect((await ann.nextOfType("error")).code).toBe("wrong_mode");
+    });
+
+    it("rejects a point outside the board", async () => {
+        const { ann } = await twoInRoom();
+        ann.send({ type: "draw", stroke: dot(0, { points: [[9999, 0]] }) });
+        expect((await ann.nextOfType("error")).code).toBe("bad_message");
     });
 });
 

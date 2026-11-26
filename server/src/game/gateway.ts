@@ -46,6 +46,7 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
     not_enough_players: "A game needs at least 2 players",
     game_running: "A game is already running",
     not_drawer: "You cannot draw now",
+    wrong_mode: "This room does not work that way",
     canvas_limit: "The drawing is too big",
     server_error: "The server had a problem. Try again",
     rate_limited: "You send messages too fast",
@@ -53,6 +54,9 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
 
 const CHAT_BURST = 5;
 const CHAT_WINDOW_MS = 5000;
+
+/** The server sends the cursor of a player at most this often */
+const CURSOR_MIN_MS = 40;
 
 /** A connection can fail this many joins. Then it is closed. This stops a script that guesses room codes */
 const MAX_JOIN_FAILURES = 10;
@@ -201,6 +205,7 @@ export async function gateway(app: FastifyInstance, opts: GatewayOptions) {
             let windowStart = Date.now();
             let windowCount = 0;
             const chatTimes: number[] = [];
+            let lastCursorAt = 0;
 
             const send = (message: ServerMessage) => {
                 if (socket.readyState === socket.OPEN)
@@ -298,6 +303,24 @@ export async function gateway(app: FastifyInstance, opts: GatewayOptions) {
                     return;
                 }
 
+                if (message.type === "cursor") {
+                    if (!joined) return fail("not_in_room");
+                    // Cursors are for shared boards only. A fast sender loses some of them. That is fine
+                    const now = Date.now();
+                    if (
+                        !rooms.hasSharedBoard(joined.code) ||
+                        now - lastCursorAt < CURSOR_MIN_MS
+                    )
+                        return;
+                    lastCursorAt = now;
+                    return sendToOthers(joined.code, joined.playerId, {
+                        type: "cursor",
+                        playerId: joined.playerId,
+                        x: message.x,
+                        y: message.y,
+                    });
+                }
+
                 if (
                     message.type === "draw" ||
                     message.type === "undo_stroke" ||
@@ -305,6 +328,33 @@ export async function gateway(app: FastifyInstance, opts: GatewayOptions) {
                 ) {
                     if (!joined) return fail("not_in_room");
                     const { code, playerId } = joined;
+
+                    if (rooms.hasSharedBoard(code)) {
+                        if (message.type === "draw") {
+                            const result = rooms.boardDraw(
+                                code,
+                                playerId,
+                                message.stroke,
+                            );
+                            if (!result.ok) return fail(result.error);
+                            return sendToOthers(code, playerId, {
+                                type: "board_draw",
+                                owner: playerId,
+                                stroke: result.chunk,
+                            });
+                        }
+                        const changed =
+                            message.type === "undo_stroke"
+                                ? rooms.boardUndo(code, playerId)
+                                : rooms.boardClear(code, playerId);
+                        if (!changed) return fail("not_in_room");
+                        // Everyone gets the whole board, also the player who did it
+                        return deliver(code, "all", {
+                            type: "board",
+                            strokes: rooms.board(code),
+                        });
+                    }
+
                     if (message.type === "draw") {
                         const result = rooms.draw(
                             code,
@@ -384,6 +434,10 @@ export async function gateway(app: FastifyInstance, opts: GatewayOptions) {
                 broadcast(message.code);
                 const strokes = rooms.strokes(message.code);
                 if (strokes.length > 0) send({ type: "canvas", strokes });
+
+                // A player who joins a shared board gets the whole board
+                const board = rooms.board(message.code);
+                if (board.length > 0) send({ type: "board", strokes: board });
             }
 
             socket.on("message", (data, isBinary) => {

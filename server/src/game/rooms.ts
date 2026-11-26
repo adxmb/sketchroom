@@ -1,8 +1,10 @@
 import { randomInt, randomUUID } from "node:crypto";
 import { applyChunk, undoLast } from "../canvas.js";
+import { applyOwned, clearOwned, undoOwned } from "../board.js";
 import {
     MAX_PLAYERS,
     ROOM_CODE_ALPHABET,
+    PLAYER_COLOURS,
     type ChatMessage,
     type GameView,
     type Mode,
@@ -10,6 +12,7 @@ import {
     type RoomView,
     type Stroke,
     type StrokeChunk,
+    type OwnedStroke,
 } from "../protocol.js";
 import {
     buildOrder,
@@ -21,6 +24,7 @@ import {
     nextTurn,
     rankPlayers,
 } from "./rules.js";
+import { fa } from "zod/locales";
 
 export interface Player {
     id: string;
@@ -29,6 +33,7 @@ export interface Player {
     userId: number | null;
     owner: string | null;
     connected: boolean;
+    colour: number;
     disconnectedAt: number | null;
 }
 
@@ -73,10 +78,12 @@ interface Room {
     emptySince: number | null;
     game: Game | null;
     lastResults: ResultsView | null;
+    board: OwnedStroke[];
 }
 
 export type StartError =
     | "room_not_found"
+    | "wrong_mode"
     | "not_host"
     | "game_running"
     | "not_enough_players";
@@ -168,6 +175,7 @@ export class RoomManager {
             emptySince: null,
             game: null,
             lastResults: null,
+            board: [],
         });
         return { ok: true, code };
     }
@@ -204,6 +212,7 @@ export class RoomManager {
             userId: who.userId,
             owner,
             connected: true,
+            colour: this.freeColour(room),
             disconnectedAt: null,
         };
         room.players.set(player.id, player);
@@ -248,6 +257,7 @@ export class RoomManager {
     startError(code: string, playerId: string): StartError | null {
         const room = this.rooms.get(code);
         if (!room) return "room_not_found";
+        if (room.mode !== "compete") return "wrong_mode";
         if (room.hostId !== playerId) return "not_host";
         if (room.game) return "game_running";
         if (room.players.size < this.minPlayers) return "not_enough_players";
@@ -507,6 +517,54 @@ export class RoomManager {
         return true;
     }
 
+    hasSharedBoard(code: string): boolean {
+        return this.rooms.get(code)?.mode === "collab";
+    }
+
+    boardDraw(
+        code: string,
+        playerId: string,
+        chunk: StrokeChunk,
+    ):
+        | { ok: true; chunk: StrokeChunk }
+        | { ok: false; error: "wrong_mode" | "not_in_room" | "canvas_limit" } {
+        const room = this.rooms.get(code);
+        if (!room || !room.players.has(playerId))
+            return { ok: false, error: "not_in_room" };
+        if (room.mode !== "collab") return { ok: false, error: "wrong_mode" };
+        const result = applyOwned(room.board, playerId, chunk);
+        if (!result) return { ok: false, error: "canvas_limit" };
+        room.board = result.strokes;
+        return { ok: true, chunk: result.chunk };
+    }
+
+    boardUndo(code: string, playerId: string): boolean {
+        const room = this.rooms.get(code);
+        if (!room || room.mode !== "collab" || !room.players.has(playerId))
+            return false;
+        room.board = undoOwned(room.board, playerId);
+        return true;
+    }
+
+    boardClear(code: string, playerId: string): boolean {
+        const room = this.rooms.get(code);
+        if (!room || room.mode !== "collab" || !room.players.has(playerId))
+            return false;
+        room.board = clearOwned(room.board, playerId);
+        return true;
+    }
+
+    board(code: string): OwnedStroke[] {
+        return this.rooms.get(code)?.board ?? [];
+    }
+
+    private freeColour(room: Room): number {
+        const used = new Set([...room.players.values()].map((p) => p.colour));
+        for (let i = 0; i < PLAYER_COLOURS.length; i++)
+            if (!used.has(i)) return i;
+        return room.players.size % PLAYER_COLOURS.length;
+    }
+
     strokes(code: string): Stroke[] {
         return this.rooms.get(code)?.game?.strokes ?? [];
     }
@@ -578,6 +636,7 @@ export class RoomManager {
                 score: room.game?.scores.get(p.id) ?? 0,
                 guessed: room.game?.guessed.has(p.id) ?? false,
                 connected: p.connected,
+                colour: p.colour,
             })),
             game: room.game ? this.gameView(room.game, viewerId) : null,
             results: room.lastResults,
