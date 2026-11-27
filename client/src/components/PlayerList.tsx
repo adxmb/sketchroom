@@ -1,4 +1,4 @@
-import type { RoomView } from "../../../server/src/protocol";
+import { PLAYER_COLOURS, RoomView } from "../../../server/src/protocol";
 
 export function PlayerList({
     room,
@@ -12,7 +12,19 @@ export function PlayerList({
         <ul className="players">
             {room.players.map((p) => (
                 <li key={p.id}>
-                    <span className="avatar" aria-hidden="true">
+                    <span
+                        className="avatar"
+                        aria-hidden="true"
+                        style={
+                            room.mode === "collab"
+                                ? {
+                                      background:
+                                          PLAYER_COLOURS[p.colour] ??
+                                          PLAYER_COLOURS[0],
+                                  }
+                                : undefined
+                        }
+                    >
                         {p.name.slice(0, 1).toUpperCase()}
                     </span>
                     <span className="player-name">{p.name}</span>

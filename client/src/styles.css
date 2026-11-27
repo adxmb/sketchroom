@@ -412,3 +412,128 @@ a:focus-visible {
     margin: 0 0 12px;
     color: var(--fg);
 }
+
+/* Shared board (collab) */
+.wrap:has(.collab) {
+    max-width: 1040px;
+}
+.collab {
+    display: grid;
+    gap: 16px;
+    align-items: start;
+}
+@media (min-width: 900px) {
+    .collab {
+        grid-template-columns: minmax(0, 1fr) 300px;
+    }
+}
+.collab-side {
+    display: grid;
+    gap: 16px;
+}
+.board-stage {
+    position: relative;
+}
+.remote-cursor {
+    position: absolute;
+    pointer-events: none;
+    transform: translate(-4px, -4px);
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    transition:
+        left 60ms linear,
+        top 60ms linear;
+}
+.remote-cursor-dot {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--cursor);
+    border: 2px solid #ffffff;
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
+}
+.remote-cursor-name {
+    font-size: 0.75rem;
+    font-weight: 700;
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: var(--cursor);
+    color: #ffffff;
+    white-space: nowrap;
+}
+.mode-picker {
+    margin-top: 8px;
+    margin-bottom: 6px;
+}
+.mode-buttons {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 6px;
+}
+.mode-item {
+    position: relative;
+    display: grid;
+}
+.mode-btn {
+    width: 100%;
+    font: inherit;
+    font-size: 0.85rem;
+    font-weight: 600;
+    padding: 5px 8px;
+    border-radius: 999px;
+    cursor: pointer;
+    border: 1px solid var(--line);
+    background: transparent;
+    color: var(--muted);
+}
+.mode-btn:hover:not(:disabled):not(.on) {
+    background: var(--chip);
+    color: var(--fg);
+}
+/* The chosen mode is quiet. It has an outline and a soft fill, so the create button stays the main action */
+.mode-btn.on {
+    background: var(--chip);
+    border-color: var(--accent);
+    color: var(--fg);
+}
+.mode-btn:disabled {
+    filter: grayscale(1);
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+.mode-btn:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+.mode-tip {
+    display: none;
+    position: absolute;
+    top: calc(100% + 8px);
+    left: 50%;
+    transform: translateX(-50%);
+    width: max-content;
+    max-width: 220px;
+    padding: 8px 10px;
+    border-radius: 10px;
+    z-index: 5;
+    background: var(--fg);
+    color: var(--bg);
+    font-size: 0.85rem;
+    line-height: 1.35;
+    pointer-events: none;
+    box-shadow: var(--shadow);
+}
+.mode-item:first-child .mode-tip {
+    left: 0;
+    transform: none;
+}
+.mode-item:last-child .mode-tip {
+    left: auto;
+    right: 0;
+    transform: none;
+}
+.mode-item:hover .mode-tip,
+.mode-btn:focus-visible + .mode-tip {
+    display: block;
+}

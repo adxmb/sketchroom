@@ -1,4 +1,4 @@
-import { useState, type SubmitEvent } from "react";
+import React, { useState, type ReactNode, type SubmitEvent } from "react";
 import { usernameSchema } from "../../../server/src/protocol";
 
 export function checkName(name: string): string | null {
@@ -14,11 +14,13 @@ export function NameForm({
     button,
     onSubmit,
     note,
+    children,
 }: {
     initial: string;
     button: string;
     onSubmit: (name: string) => void;
     note?: string;
+    children?: ReactNode;
 }) {
     const [name, setName] = useState(initial);
     const [error, setError] = useState<string | null>(null);
@@ -47,6 +49,7 @@ export function NameForm({
                     {error}
                 </p>
             )}
+            {children}
             <button className="btn primary">{button}</button>
         </form>
     );

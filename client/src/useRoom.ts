@@ -104,6 +104,18 @@ export function useRoom(code: string, name: string | null) {
             dispatch({ type: "local_chunk", chunk }),
         drawSend: (stroke: StrokeChunk) =>
             sendMessage({ type: "draw", stroke }),
+        boardLocal: (chunk: StrokeChunk) =>
+            dispatch({ type: "local_board_chunk", chunk }),
+        boardUndo: () => {
+            dispatch({ type: "local_board_undo" });
+            sendMessage({ type: "undo_stroke" });
+        },
+        boardClear: () => {
+            dispatch({ type: "local_board_clear" });
+            sendMessage({ type: "clear_canvas" });
+        },
+        sendCursor: (x: number, y: number) =>
+            sendMessage({ type: "cursor", x, y }),
         undo: () => {
             dispatch({ type: "local_undo" });
             sendMessage({ type: "undo_stroke" });

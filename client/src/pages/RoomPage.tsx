@@ -4,6 +4,7 @@ import { roomCodeSchema } from "../../../server/src/protocol";
 import { NameForm, checkName } from "../components/NameForm";
 import { GameScreen } from "../components/GameScreen";
 import { PlayerList } from "../components/PlayerList";
+import { CollabScreen } from "../components/CollabScreen";
 import { loadGuestName, saveGuestName } from "../guestName";
 import { useRoom } from "../useRoom";
 import type { Session } from "../useSession";
@@ -74,6 +75,10 @@ function Lobby({
         drawSend,
         undo,
         clearCanvas,
+        boardLocal,
+        boardUndo,
+        boardClear,
+        sendCursor,
     } = useRoom(code, name);
     const [copied, setCopied] = useState(false);
 
@@ -166,7 +171,20 @@ function Lobby({
                 </p>
             )}
 
-            {room.game ? (
+            {room.mode === "collab" ? (
+                <CollabScreen
+                    room={room}
+                    state={state}
+                    actions={{
+                        onLocal: boardLocal,
+                        onSend: drawSend,
+                        onCursor: sendCursor,
+                        onUndo: boardUndo,
+                        onClear: boardClear,
+                        onChat: sendChat,
+                    }}
+                />
+            ) : room.game ? (
                 <GameScreen
                     room={room}
                     game={room.game}

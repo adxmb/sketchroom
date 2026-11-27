@@ -1,12 +1,15 @@
+import { applyOwned, clearOwned, undoOwned } from "../../server/src/board";
 import { applyChunk, undoLast } from "../../server/src/canvas";
 import type {
     ChatMessage,
+    OwnedStroke,
     RoomView,
     ServerMessage,
     Stroke,
     StrokeChunk,
 } from "../../server/src/protocol";
 
+// reconnecting: the connection broke. The screen stays and the page tries again
 export type RoomStatus =
     | "connecting"
     | "joined"
@@ -27,6 +30,10 @@ export interface RoomState {
     error: string | null;
     /** The drawing of the current turn */
     strokes: Stroke[];
+    /** The shared board of a collab room. Every stroke has an owner */
+    board: OwnedStroke[];
+    /** Where the pointers of the other players are, by player id. Board units */
+    cursors: Record<string, { x: number; y: number }>;
     chat: ChatEntry[];
     /** The key for the next chat message */
     chatSeq: number;
@@ -36,11 +43,16 @@ export type RoomEvent =
     | { type: "connecting" }
     | { type: "message"; message: ServerMessage }
     | { type: "socket_closed" }
+    // The connection broke. The page keeps the room, the chat and the drawing, and tries again
+    | { type: "reconnecting" }
     // The drawer changes the drawing here at once. The server does not send it back
     | { type: "local_chunk"; chunk: StrokeChunk }
     | { type: "local_undo" }
     | { type: "local_clear" }
-    | { type: "reconnecting" };
+    // The same on a shared board. The strokes belong to this player
+    | { type: "local_board_chunk"; chunk: StrokeChunk }
+    | { type: "local_board_undo" }
+    | { type: "local_board_clear" };
 
 export const initialRoomState: RoomState = {
     status: "connecting",
@@ -48,6 +60,8 @@ export const initialRoomState: RoomState = {
     room: null,
     error: null,
     strokes: [],
+    board: [],
+    cursors: {},
     chat: [],
     chatSeq: 0,
 };
@@ -77,6 +91,23 @@ export function roomReducer(state: RoomState, event: RoomEvent): RoomState {
             return { ...state, strokes: undoLast(state.strokes) };
         case "local_clear":
             return { ...state, strokes: [] };
+        case "local_board_chunk": {
+            if (!state.playerId) return state;
+            return {
+                ...state,
+                board:
+                    applyOwned(state.board, state.playerId, event.chunk)
+                        ?.strokes ?? state.board,
+            };
+        }
+        case "local_board_undo":
+            return state.playerId
+                ? { ...state, board: undoOwned(state.board, state.playerId) }
+                : state;
+        case "local_board_clear":
+            return state.playerId
+                ? { ...state, board: clearOwned(state.board, state.playerId) }
+                : state;
         case "message": {
             const m = event.message;
             switch (m.type) {
@@ -88,12 +119,24 @@ export function roomReducer(state: RoomState, event: RoomEvent): RoomState {
                         state.room?.game &&
                         m.room.game &&
                         state.room.game.turn === m.room.game.turn;
+                    // A pointer of a player who is gone or offline must not stay on the board
+                    const here = new Set(
+                        m.room.players
+                            .filter((p) => p.connected)
+                            .map((p) => p.id),
+                    );
+                    const cursors = Object.fromEntries(
+                        Object.entries(state.cursors).filter(([id]) =>
+                            here.has(id),
+                        ),
+                    );
                     return {
                         ...state,
                         status: "joined",
                         room: m.room,
                         error: null,
                         strokes: sameTurn ? state.strokes : [],
+                        cursors,
                     };
                 }
                 case "draw":
@@ -105,11 +148,23 @@ export function roomReducer(state: RoomState, event: RoomEvent): RoomState {
                     };
                 case "canvas":
                     return { ...state, strokes: m.strokes };
-                // The shared board messages. The client uses them from day 9
                 case "board_draw":
+                    return {
+                        ...state,
+                        board:
+                            applyOwned(state.board, m.owner, m.stroke)
+                                ?.strokes ?? state.board,
+                    };
                 case "board":
+                    return { ...state, board: m.strokes };
                 case "cursor":
-                    return state;
+                    return {
+                        ...state,
+                        cursors: {
+                            ...state.cursors,
+                            [m.playerId]: { x: m.x, y: m.y },
+                        },
+                    };
                 case "chat":
                     return {
                         ...state,
@@ -125,6 +180,8 @@ export function roomReducer(state: RoomState, event: RoomEvent): RoomState {
                         status: "closed",
                         room: null,
                         strokes: [],
+                        board: [],
+                        cursors: {},
                         chat: [],
                     };
                 case "error":

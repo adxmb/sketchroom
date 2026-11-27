@@ -384,3 +384,182 @@ describe("roomReducer", () => {
         });
     });
 });
+
+describe("shared board", () => {
+    const joined = (): RoomState => {
+        let s = roomReducer(initialRoomState, {
+            type: "message",
+            message: { type: "welcome", playerId: "p1" },
+        });
+        s = roomReducer(s, {
+            type: "message",
+            message: {
+                type: "room_state",
+                room: {
+                    ...room,
+                    mode: "collab",
+                    players: [
+                        room.players[0]!,
+                        {
+                            ...room.players[0]!,
+                            id: "p2",
+                            name: "bob",
+                            isHost: false,
+                            colour: 1,
+                        },
+                    ],
+                },
+            },
+        });
+        return s;
+    };
+    const chunk = (id: number, extra = {}) => ({
+        id,
+        colour: 1,
+        size: 1,
+        points: [[5, 5]] as [number, number][],
+        ...extra,
+    });
+
+    it("starts with an empty board and no cursors", () => {
+        expect(initialRoomState).toMatchObject({ board: [], cursors: {} });
+    });
+
+    it("adds my own strokes at once, with my id as owner", () => {
+        const s = roomReducer(joined(), {
+            type: "local_board_chunk",
+            chunk: chunk(0, { done: true }),
+        });
+        expect(s.board).toMatchObject([{ owner: "p1", id: 0, done: true }]);
+    });
+
+    it("adds the strokes of another player, with the same stroke id", () => {
+        let s = roomReducer(joined(), {
+            type: "local_board_chunk",
+            chunk: chunk(0, { done: true }),
+        });
+        s = roomReducer(s, {
+            type: "message",
+            message: { type: "board_draw", owner: "p2", stroke: chunk(0) },
+        });
+        s = roomReducer(s, {
+            type: "message",
+            message: {
+                type: "board_draw",
+                owner: "p2",
+                stroke: chunk(0, { done: true }),
+            },
+        });
+        expect(s.board.map((x) => [x.owner, x.id])).toEqual([
+            ["p1", 0],
+            ["p2", 0],
+        ]);
+        expect(s.board[1]!.points).toHaveLength(2);
+    });
+
+    it("undoes and clears only my strokes", () => {
+        let s = roomReducer(joined(), {
+            type: "local_board_chunk",
+            chunk: chunk(0, { done: true }),
+        });
+        s = roomReducer(s, {
+            type: "message",
+            message: {
+                type: "board_draw",
+                owner: "p2",
+                stroke: chunk(0, { done: true }),
+            },
+        });
+        s = roomReducer(s, {
+            type: "local_board_chunk",
+            chunk: chunk(1, { done: true }),
+        });
+        s = roomReducer(s, { type: "local_board_undo" });
+        expect(s.board.map((x) => [x.owner, x.id])).toEqual([
+            ["p1", 0],
+            ["p2", 0],
+        ]);
+        s = roomReducer(s, { type: "local_board_clear" });
+        expect(s.board.map((x) => x.owner)).toEqual(["p2"]);
+    });
+
+    it("does not draw before the welcome message gives my id", () => {
+        const s = roomReducer(initialRoomState, {
+            type: "local_board_chunk",
+            chunk: chunk(0),
+        });
+        expect(s.board).toEqual([]);
+    });
+
+    it("takes the whole board from the server", () => {
+        const strokes = [
+            {
+                owner: "p2",
+                id: 3,
+                colour: 0,
+                size: 0,
+                points: [[1, 1]] as [number, number][],
+                done: true,
+            },
+        ];
+        const s = roomReducer(joined(), {
+            type: "message",
+            message: { type: "board", strokes },
+        });
+        expect(s.board).toEqual(strokes);
+    });
+
+    it("keeps the board when the room state changes", () => {
+        let s = roomReducer(joined(), {
+            type: "local_board_chunk",
+            chunk: chunk(0, { done: true }),
+        });
+        s = roomReducer(s, {
+            type: "message",
+            message: { type: "room_state", room: { ...room, mode: "collab" } },
+        });
+        expect(s.board).toHaveLength(1);
+    });
+
+    it("keeps the cursor of a player, and removes it when the player is gone", () => {
+        let s = roomReducer(joined(), {
+            type: "message",
+            message: { type: "cursor", playerId: "p2", x: 10, y: 20 },
+        });
+        expect(s.cursors).toEqual({ p2: { x: 10, y: 20 } });
+        s = roomReducer(s, {
+            type: "message",
+            message: { type: "room_state", room: { ...room, mode: "collab" } },
+        });
+        expect(s.cursors).toEqual({});
+    });
+
+    it("removes the cursor of a player who is offline", () => {
+        let s = roomReducer(joined(), {
+            type: "message",
+            message: { type: "cursor", playerId: "p2", x: 1, y: 1 },
+        });
+        const offline = {
+            ...room,
+            mode: "collab" as const,
+            players: [
+                room.players[0]!,
+                { ...room.players[0]!, id: "p2", connected: false },
+            ],
+        };
+        s = roomReducer(s, {
+            type: "message",
+            message: { type: "room_state", room: offline },
+        });
+        expect(s.cursors).toEqual({});
+    });
+
+    it("clears the board and the cursors when the player leaves", () => {
+        let s = roomReducer(joined(), {
+            type: "local_board_chunk",
+            chunk: chunk(0),
+        });
+        s = roomReducer(s, { type: "message", message: { type: "left" } });
+        expect(s).toMatchObject({ board: [], cursors: {} });
+    });
+});

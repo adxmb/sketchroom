@@ -1,6 +1,6 @@
 import { useState, type SubmitEvent } from "react";
 import { useNavigate } from "react-router-dom";
-import { roomCodeSchema } from "../../../server/src/protocol";
+import { roomCodeSchema, type Mode } from "../../../server/src/protocol";
 import { api } from "../api";
 import { AuthBox } from "../components/AuthBox";
 import { NameForm } from "../components/NameForm";
@@ -13,11 +13,12 @@ export function Home({ session }: { session: Session }) {
     const [code, setCode] = useState("");
     const [codeError, setCodeError] = useState<string | null>(null);
     const [createError, setCreateError] = useState<string | null>(null);
+    const [mode, setMode] = useState<Mode>("compete");
 
     const create = async (guestName?: string) => {
         setCreateError(null);
         if (guestName) saveGuestName(guestName);
-        const res = await api.createRoom("compete");
+        const res = await api.createRoom(mode);
         if (res.ok) navigate(`/r/${res.data.code}`);
         else setCreateError(res.error);
     };
@@ -44,6 +45,7 @@ export function Home({ session }: { session: Session }) {
                         <p className="muted">
                             You will play as {session.user.username}
                         </p>
+                        <ModePicker mode={mode} onChange={setMode} />
                         <button
                             className="btn primary"
                             onClick={() => create()}
@@ -56,11 +58,15 @@ export function Home({ session }: { session: Session }) {
                         initial={loadGuestName()}
                         button="Create room"
                         onSubmit={create}
-                    />
+                    >
+                        <ModePicker mode={mode} onChange={setMode} />
+                    </NameForm>
                 )}
-                <p className="muted small-note">
-                    Mode: compete (collab coming soon...)
-                </p>
+                {createError && (
+                    <p className="error" role="alert">
+                        {createError}
+                    </p>
+                )}
             </section>
 
             <section className="card">
@@ -91,5 +97,62 @@ export function Home({ session }: { session: Session }) {
             <AuthBox session={session} />
             <Leaderboard />
         </>
+    );
+}
+
+const MODES: { mode: Mode; title: string; text: string; ready: boolean }[] = [
+    {
+        mode: "compete",
+        title: "Compete",
+        text: "One player draws a secret word. The others guess it.",
+        ready: true,
+    },
+    {
+        mode: "teams",
+        title: "Teams",
+        text: "Two teams. One team draws together. The other team guesses. Coming soon.",
+        ready: false,
+    },
+    {
+        mode: "collab",
+        title: "Collab",
+        text: "A shared whiteboard for 2 to 8 players. No score, no word.",
+        ready: true,
+    },
+];
+
+function ModePicker({
+    mode,
+    onChange,
+}: {
+    mode: Mode;
+    onChange: (mode: Mode) => void;
+}) {
+    return (
+        <div className="mode-picker" role="group" aria-label="Mode">
+            <div className="mode-buttons">
+                {MODES.map((m) => (
+                    <div key={m.mode} className="mode-item">
+                        <button
+                            type="button"
+                            className={`mode-btn${mode === m.mode ? " on" : ""}`}
+                            aria-pressed={mode === m.mode}
+                            aria-describedby={`mode-tip-${m.mode}`}
+                            disabled={!m.ready}
+                            onClick={() => onChange(m.mode)}
+                        >
+                            {m.title}
+                        </button>
+                        <span
+                            id={`mode-tip-${m.mode}`}
+                            role="tooltip"
+                            className="mode-tip"
+                        >
+                            {m.text}
+                        </span>
+                    </div>
+                ))}
+            </div>
+        </div>
     );
 }
